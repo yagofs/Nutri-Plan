@@ -1,0 +1,1653 @@
+from collections import defaultdict
+from importlib.metadata import PackageNotFoundError, version as get_installed_version
+import multiprocessing
+import random
+import sys
+import traceback
+from enum import Enum
+from functools import partial
+from packaging.requirements import Requirement, InvalidRequirement
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
+from pathlib import Path
+from typing import Any, Callable
+
+import numpy
+from SALib.sample import ff as fractional_factorial_sampler
+from SALib.sample import sobol as sobol_sampler
+from SALib.sample import morris as morris_sampler
+
+from RUFAS.biophysical.animal.herd_factory import HerdFactory
+from RUFAS.data_collection_app_updater import DataCollectionAppUpdater
+from RUFAS.e2e_test_results_handler import E2ETestResultsHandler
+from RUFAS.input_manager import InputManager
+from RUFAS.output_manager import LogVerbosity, OutputManager
+from RUFAS.simulation_engine import SimulationEngine, SimulationType
+from RUFAS.units import MeasurementUnits
+from RUFAS.util import Utility
+
+PYPROJECT_FILE_PATH = Path("pyproject.toml")
+MINIMUM_PYTHON_VERSION = Version("3.12")
+
+"""These constants define the minimum and maximum integers that can be passed to Numpy's random.seed method."""
+NUMPY_RANDOM_SEED_LOWER_BOUND = 0
+NUMPY_RANDOM_SEED_UPPER_BOUND = 2**32 - 1
+
+
+class TaskType(Enum):
+    """Enum for different task types handled by TaskManager."""
+
+    HERD_INITIALIZATION = "Initializes simulation to generate a stable herd"
+    SIMULATION_SINGLE_RUN = "A single simulation run"
+    SIMULATION_MULTI_RUN = (
+        "Runs multiple simulations to generate statistically significant results. "
+        "Automatically changes the random seed."
+    )
+    SENSITIVITY_ANALYSIS = "Run sensitivity analysis"
+    INPUT_DATA_AUDIT = "Validates input data and saves metadata properties as CSV"
+    END_TO_END_TESTING = (
+        "Runs RuFaS's end-to-end testing routine. Ensures all components of RuFaS work together "
+        "correctly from start to finish."
+    )
+    POST_PROCESSING = "Bypass simulation engine and directly run Output Manager"
+    COMPARE_METADATA_PROPERTIES = "Compares 2 metadata properties files and saves the differences in a .txt file"
+    DATA_COLLECTION_APP_UPDATE = "Updates the schema and interface of the Data Collection App"
+    UPDATE_E2E_TEST_RESULTS = "Updates end-to-end expected test results with new actual results"
+
+    @staticmethod
+    def from_string(input_str: str) -> "TaskType":
+        """
+        Converts a string to a ``TaskType`` enum.
+
+        Parameters
+        ----------
+        input_str : str
+            The string to convert.
+
+        Returns
+        -------
+        TaskType
+            The corresponding ``TaskType`` enum.
+
+        Raises
+        ------
+        ValueError
+            When the input string is not a valid task type.
+        """
+        normalized_input = "_".join(input_str.strip().upper().split())
+        try:
+            return TaskType[normalized_input]
+        except KeyError:
+            raise ValueError(f"The string '{input_str}' is not a match with any acceptable TaskType.")
+
+    def is_multi_run(self) -> bool:
+        """
+        Checks if the task type involves multiple runs.
+
+        Returns
+        -------
+        bool
+            Whether the task type involves multiple runs.
+        """
+        return self in [TaskType.SIMULATION_MULTI_RUN, TaskType.SENSITIVITY_ANALYSIS, TaskType.END_TO_END_TESTING]
+
+
+class TaskManager:
+    """Manager class for handling tasks related to simulations and analyses."""
+
+    INPUT_DATA_CSV_WORKING_FOLDER = Path("output/saved_pool_working_folder/")
+
+    def __init__(self) -> None:
+        self.output_manager = OutputManager()
+
+    def start(
+        self,
+        metadata_path: Path,
+        verbosity: LogVerbosity | None,
+        exclude_info_maps: bool,
+        output_directory: Path,
+        logs_directory: Path,
+        clear_output_directory: bool,
+        produce_graphics: bool,
+        suppress_log_files: bool,
+        metadata_depth_limit: int,
+    ) -> None:
+        """
+        Initializes and starts the task management process.
+
+        Parameters
+        ----------
+        metadata_path : Path
+            Path to the metadata file that contains task management inputs.
+        verbosity : LogVerbosity | None
+            Verbosity level for the simulation and ``TaskManager``.
+        exclude_info_maps : bool
+            Flag to exclude information maps.
+        output_directory : Path
+            Path to the directory where outputs will be saved.
+        logs_directory : Path
+            Path to the directory where logs from the ``TaskManager`` will be saved.
+        clear_output_directory : bool
+            Whether to clear the output directory.
+        produce_graphics : bool
+            Whether to produce graphics.
+        suppress_log_files : bool
+            Whether to write logs from the ``TaskManager`` to output files.
+        metadata_depth_limit : int
+            Override value for maximum metadata properties depth set in ``InputManager``.
+
+        Raises
+        ------
+        Exception
+            If the input data is invalid.
+
+        Notes
+        -----
+        We set ``maxtasksperchild=1`` to maintain isolation between tasks and ensure no memory
+        leaks happen in IO Managers.
+
+        """
+        self.input_manager = InputManager(metadata_depth_limit)
+        self.output_manager.run_startup_sequence(
+            verbosity=LogVerbosity.ERRORS if verbosity is None else verbosity,
+            exclude_info_maps=exclude_info_maps,
+            output_directory=output_directory,
+            clear_output_directory=clear_output_directory,
+            chunkification=False,
+            max_memory_usage_percent=0,
+            max_memory_usage=0,
+            save_chunk_threshold_call_count=0,
+            variables_file_path=Path(""),
+            output_prefix="Task Manager",
+            task_id="TASK MANAGER",
+            is_end_to_end_testing_run=False,
+        )
+        self.check_python_version()
+        self.check_dependencies()
+        rufas_version = self.get_rufas_version()
+        self.output_manager.print_credits(rufas_version)
+        info_map = {
+            "class": TaskManager.__name__,
+            "function": TaskManager.start.__name__,
+        }
+        self.output_manager.add_log("Task Manager Start", "Task Manager Started.", info_map)
+        is_data_valid = self.input_manager.start_data_processing(
+            metadata_path=metadata_path, input_root=Path(""), task_id="TASK MANAGER", cross_validation_file_paths=None
+        )
+        task_config: dict[str, Any] = self.input_manager.get_data("tasks")
+        for task in task_config.get("tasks", []):
+            filters_path = Path(task["filters_directory"])
+            self.output_manager.validate_filter_content(filters_path)
+
+        if not is_data_valid:
+            TaskManager.handle_post_processing(
+                args={
+                    "exclude_info_maps": exclude_info_maps,
+                    "variable_name_style": "verbose",
+                    "logs_directory": logs_directory,
+                    "suppress_log_files": suppress_log_files,
+                    "output_prefix": "task_manager",
+                },
+                input_manager=self.input_manager,
+                output_manager=self.output_manager,
+                task_id="TASK_MANAGER",
+                should_flush_im_pool=True,
+            )
+            raise Exception("Task Manager's input data is invalid.")
+
+        workers: int = task_config["parallel_workers"]
+        self.output_manager.add_log(
+            "Task Manager workers", f"Task Manager is going to run {workers} in parallel.", info_map
+        )
+        self.pool = multiprocessing.Pool(workers, maxtasksperchild=1) if workers > 1 else None
+        parsed_single_run_args, parsed_multi_run_args = self._parse_input_tasks()
+        self.output_manager.add_log(
+            "Task Manager parsed tasks",
+            f"Parsed {len(parsed_single_run_args) + len(parsed_multi_run_args)} tasks args.",
+            info_map,
+        )
+        expanded_args = self._expand_multi_runs_to_single_runs(parsed_multi_run_args)
+        runnable_args = parsed_single_run_args + expanded_args
+        self.output_manager.add_log(
+            "Task Manager expanded tasks",
+            f"Expanded task args to {len(runnable_args)}. Starting the tasks...",
+            info_map,
+        )
+        for i in range(len(runnable_args)):
+            runnable_args[i]["task_id"] = f"{i + 1}/{len(runnable_args)}"
+        failed_tasks = self._run_tasks(
+            runnable_args, produce_graphics, metadata_depth_limit, workers, metadata_path, output_directory, verbosity
+        )
+
+        export_input_data_to_csv: bool = task_config.get("export_input_data_to_csv", False)
+        input_data_csv_export_path: str = task_config.get("input_data_csv_export_path", "")
+        input_data_csv_import_path: str = task_config.get("input_data_csv_import_path", "")
+        is_end_to_end_test_task = any(task.get("task_type") == TaskType.END_TO_END_TESTING for task in runnable_args)
+        is_update_end_to_end_test_task = any(
+            task.get("task_type") == TaskType.UPDATE_E2E_TEST_RESULTS for task in runnable_args
+        )
+        if is_update_end_to_end_test_task:
+            sys.stdout.write(
+                "Reminder: remove the autogenerated // WARNING line at the top of filter files before using it as"
+                " JSON.\n"
+            )
+
+        if is_end_to_end_test_task:
+            e2e_groups = self._group_end_to_end_testing_runs(runnable_args)
+
+            comparison_args = []
+
+            for comparison_number, (e2e_group, e2e_runs) in enumerate(
+                e2e_groups.items(),
+                start=1,
+            ):
+                comparison_args.append(
+                    {
+                        "e2e_group": e2e_group,
+                        "e2e_runs": e2e_runs,
+                        "task_id": (f"E2E comparison " f"{comparison_number}/{len(e2e_groups)}"),
+                    }
+                )
+
+            comparisons_succeeded = self._run_end_to_end_testing_comparisons(
+                comparison_args=comparison_args,
+                produce_graphics=produce_graphics,
+                metadata_depth_limit=metadata_depth_limit,
+                workers=workers,
+                output_directory=output_directory,
+                verbosity=verbosity,
+            )
+
+            output_prefixes = list(e2e_groups.keys())
+
+            self.output_manager.add_log(
+                "Summarizing e2e test results",
+                f"Gathering e2e results for {output_prefixes}...",
+                info_map,
+            )
+            e2e_random_seeds = {
+                group_name: [run["random_seed"] for run in group_runs] for group_name, group_runs in e2e_groups.items()
+            }
+            json_output_directory = next(iter(e2e_groups.values()))[0]["json_output_directory"]
+
+            failed_e2e_groups: list[str] = [
+                e2e_group
+                for e2e_group, e2e_runs in e2e_groups.items()
+                if any(f"{run['output_prefix']} ({run['task_id']})" in failed_tasks for run in e2e_runs)
+            ]
+
+            if comparisons_succeeded:
+                self.output_manager.summarize_e2e_test_results(
+                    json_output_directory, output_prefixes, e2e_random_seeds, failed_e2e_groups
+                )
+
+        TaskManager.handle_post_processing(
+            args={
+                "exclude_info_maps": exclude_info_maps,
+                "variable_name_style": "verbose",
+                "logs_directory": logs_directory,
+                "suppress_log_files": suppress_log_files,
+                "input_data_csv_export_path": Path(input_data_csv_export_path),
+                "input_data_csv_import_path": Path(input_data_csv_import_path),
+                "output_prefix": "task_manager",
+            },
+            input_manager=self.input_manager,
+            output_manager=self.output_manager,
+            task_id="TASK_MANAGER",
+            should_flush_im_pool=False,
+            export_input_data_to_csv=export_input_data_to_csv,
+        )
+
+    def get_rufas_version(self) -> str:
+        """
+        Returns the current version of RUFAS.
+
+        Returns
+        -------
+        str
+            Version string of RuFaS, or ``"Unknown"`` if the version cannot be read.
+        """
+        try:
+            with open(PYPROJECT_FILE_PATH, "rb") as pyproject_file:
+                import tomllib
+
+                rufas_version = tomllib.load(pyproject_file)["project"]["version"]
+        except Exception as e:
+            self.output_manager.add_error(
+                "Error reading RUFAS version",
+                f"Unable to read RUFAS version from pyproject.toml file. {e}",
+                {"class": self.__class__.__name__, "function": self.get_rufas_version.__name__},
+            )
+            return "Unknown"
+        return str(rufas_version)
+
+    def check_dependencies(self) -> None:
+        """
+        Checks if the required dependencies are installed.
+
+        Raises
+        ------
+        RuntimeError
+            If a required dependency is not installed or does not meet the version requirements
+            specified in pyproject.toml.
+        """
+        import tomllib
+
+        with open(PYPROJECT_FILE_PATH, "rb") as pyproject_file:
+            project_data = tomllib.load(pyproject_file)
+
+        dependencies = project_data.get("project", {}).get("dependencies", [])
+        for dependency in dependencies:
+            try:
+                requirement = Requirement(dependency)
+            except InvalidRequirement as e:
+                self.output_manager.add_error(
+                    "Invalid requirement syntax",
+                    f"The dependency string '{dependency}' is invalid. Error: {e}",
+                    {"class": TaskManager.__name__, "function": TaskManager.check_dependencies.__name__},
+                )
+                raise RuntimeError(f"Invalid dependency string in pyproject.toml: {dependency!r}") from e
+
+            package_name = requirement.name
+
+            try:
+                installed_version = get_installed_version(package_name)
+            except PackageNotFoundError as e:
+                self.output_manager.add_error(
+                    "Missing dependency",
+                    f"Required package '{package_name}' is not installed. We suggest running 'pip install .'"
+                    " to install all dependencies at required minimum levels.",
+                    {"class": TaskManager.__name__, "function": TaskManager.check_dependencies.__name__},
+                )
+                raise RuntimeError(f"Required package '{package_name}' is not installed.") from e
+
+            if requirement.specifier and not requirement.specifier.contains(installed_version):
+                self.output_manager.add_error(
+                    "Dependency version doesn't meet requirements",
+                    f"Required package '{package_name}' version does not match. Installed: {installed_version}, "
+                    f"Required: {requirement.specifier}. We suggest running 'pip install .' to install all"
+                    " dependencies at required minimum levels.",
+                    {"class": TaskManager.__name__, "function": TaskManager.check_dependencies.__name__},
+                )
+                raise RuntimeError(
+                    f"Required package '{package_name}' version does not match. Installed: {installed_version}, "
+                    f"Required: {requirement.specifier}"
+                )
+
+    def check_python_version(self) -> None:
+        """
+        Checks if the Python version meets the version range set in ``pyproject.toml``.
+
+        Raises
+        ------
+        RuntimeError
+            - If the Python version does not meet the version range specified in ``pyproject.toml``.
+            - If ``pyproject.toml`` is not found.
+            - If the ``requires-python`` field is missing in ``pyproject.toml``.
+            - If an unexpected error occurs while checking the Python version.
+        """
+        user_python_version = Version(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+        try:
+            import tomllib
+
+            with open(PYPROJECT_FILE_PATH, "rb") as pyproject_file:
+                pyproject_data = tomllib.load(pyproject_file)
+            requires_python = pyproject_data["project"]["requires-python"]
+            specifier = SpecifierSet(requires_python)
+            if user_python_version not in specifier:
+                self.output_manager.add_error(
+                    "Python version mismatch",
+                    f"RUFAS requires Python {requires_python}, but you are using Python {user_python_version}. "
+                    "Please upgrade or downgrade your Python version to match the required version range.",
+                    {"class": TaskManager.__name__, "function": TaskManager.check_python_version.__name__},
+                )
+                raise RuntimeError(f"Please check your Python version. RUFAS requires Python {requires_python}.")
+            if MINIMUM_PYTHON_VERSION not in specifier:
+                self.output_manager.add_error(
+                    "Python pyproject.toml version mismatch",
+                    f"The pyproject.toml file says RUFAS requires Python {requires_python}, but the minimum version set"
+                    f" in TM is {MINIMUM_PYTHON_VERSION}. Please check both versions and make sure they agree on"
+                    " the correct version range.",
+                    {"class": TaskManager.__name__, "function": TaskManager.check_python_version.__name__},
+                )
+        except ImportError:
+            raise RuntimeError(
+                f"RUFAS requires Python {str(MINIMUM_PYTHON_VERSION)} or later. Please upgrade your Python version."
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"pyproject.toml file not found. Ensure the file exists at the specified path: {PYPROJECT_FILE_PATH}."
+            )
+        except KeyError:
+            raise RuntimeError("The 'requires-python' field is missing in pyproject.toml.")
+        except Exception as e:
+            raise RuntimeError(f"An unexpected error occurred while checking the Python version: {e}")
+
+    def _parse_input_tasks(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """
+        Parses input tasks into single and multiple run tasks.
+
+        Raises
+        ------
+        ValueError
+            - If ``SIMULATION_SINGLE_RUN`` task type and multiple random seeds specified in task inputs.
+
+        Returns
+        -------
+        tuple[list[dict[str, Any]], list[dict[str, Any]]]
+            - Parsed single-run task arguments.
+            - Parsed multi-run task arguments.
+
+        """
+        parsed_single_run_args: list[dict[str, Any]] = []
+        parsed_multi_run_args: list[dict[str, Any]] = []
+        task_config: dict[str, Any] = self.input_manager.get_data("tasks")
+        tasks_from_input: list[dict[str, Any]] = task_config.get("tasks")
+        task_manager_metadata_properties = self.input_manager.get_metadata("properties")
+        export_input_data_to_csv = task_config.get("export_input_data_to_csv")
+        input_data_csv_export_path = Path(task_config.get("input_data_csv_export_path"))
+        input_data_csv_import_path = Path(task_config.get("input_data_csv_import_path"))
+        for input_task in tasks_from_input:
+            input_task["task_type"] = TaskType.from_string(input_task["task_type"])
+            input_task["input_patch"] = None
+            input_task["metadata_file_path"] = Path(input_task["metadata_file_path"])
+            input_task["properties_file_path"] = Path(input_task["properties_file_path"])
+            input_task["comparison_properties_file_path"] = Path(input_task["comparison_properties_file_path"])
+            input_task["convert_variable_table_path"] = (
+                Path(input_task["convert_variable_table_path"]) if "convert_variable_table_path" in input_task else None
+            )
+            input_task["logs_directory"] = Path(input_task["logs_directory"])
+            input_task["suppress_log_files"] = input_task["suppress_log_files"]
+            input_task["save_animals_directory"] = Path(input_task["save_animals_directory"])
+            input_task["filters_directory"] = Path(input_task["filters_directory"])
+            input_task["csv_output_directory"] = Path(input_task["csv_output_directory"])
+            input_task["json_output_directory"] = Path(input_task["json_output_directory"])
+            input_task["report_directory"] = Path(input_task["report_directory"])
+            input_task["graphics_directory"] = Path(input_task["graphics_directory"])
+            input_task["output_pool_path"] = Path(input_task["output_pool_path"])
+            saved_output_pools = []
+            for saved_pool in input_task.get("saved_output_pools", []):
+                saved_output_pools.append({"name": saved_pool["name"], "path": Path(saved_pool["path"])})
+            input_task["saved_output_pools"] = saved_output_pools
+            input_task["export_input_data_to_csv"] = export_input_data_to_csv
+            input_task["input_data_csv_export_path"] = input_data_csv_export_path
+            input_task["input_data_csv_import_path"] = input_data_csv_import_path
+            input_task["task_manager_metadata_properties"] = task_manager_metadata_properties
+            random_seeds = input_task.get("random_seeds", [0])
+            if not isinstance(random_seeds, list) or not random_seeds:
+                self.output_manager.add_error(
+                    "Invalid Random Seeds",
+                    "Random seeds must be provided as a non-empty list, or omitted to use the default seed [0].",
+                    info_map={"class": TaskManager.__name__, "function": self._parse_input_tasks.__name__},
+                )
+                raise ValueError("Random seeds must be a non-empty list.")
+
+            input_task["random_seeds"] = random_seeds
+
+            if input_task["task_type"].is_multi_run():
+                parsed_multi_run_args.append(input_task)
+            else:
+                random_seeds = input_task.pop("random_seeds")
+                if input_task["task_type"] == TaskType.SIMULATION_SINGLE_RUN and len(random_seeds) != 1:
+                    self.output_manager.add_error(
+                        "Single Run Random Seed Error",
+                        "SIMULATION_SINGLE_RUN task type requires exactly one random seed, but the specified "
+                        f"random seeds list contains {len(random_seeds)} seeds. Check task input specifications "
+                        "and confirm the task type and random seeds selected.",
+                        info_map={"class": TaskManager.__name__, "function": self._parse_input_tasks.__name__},
+                    )
+                    raise ValueError(
+                        "SIMULATION_SINGLE_RUN task type selected but multiple random seeds specified.  "
+                        "Check task input specifications and confirm task type and random seeds selected."
+                    )
+                input_task["random_seed"] = random_seeds[0]
+                parsed_single_run_args.append(input_task)
+        return parsed_single_run_args, parsed_multi_run_args
+
+    def _expand_multi_runs_to_single_runs(self, multi_run_args: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Expands multi-run tasks into single-run tasks for execution.
+
+        Parameters
+        ----------
+        multi_run_args : list[dict[str, Any]]
+            list of multi-run task arguments.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Expanded list of single-run tasks.
+        """
+        expanded_args: list[dict[str, Any]] = []
+        task_type_to_expander_map = {
+            TaskType.SIMULATION_MULTI_RUN: self._expand_simulation_multi_run_args,
+            TaskType.SENSITIVITY_ANALYSIS: self._expand_sensitivity_analysis_args,
+            TaskType.END_TO_END_TESTING: self._expand_end_to_end_testing_args,
+        }
+        for multi_run_arg in multi_run_args:
+            task_type = multi_run_arg["task_type"]
+            expanded_args += task_type_to_expander_map[task_type](multi_run_arg)
+
+        return expanded_args
+
+    def _expand_simulation_multi_run_args(self, multi_run_args: dict[str, Any]) -> list[dict[str, Any]]:
+        """
+        Expands a multi-run simulation argument dict into a list of single-run
+        argument dicts.
+
+        Each single-run dict is a copy of the original with ``task_type`` set to
+        ``TaskType.SIMULATION_SINGLE_RUN``, a unique random seed, and an output
+        prefix suffixed with the run index.
+
+        Parameters
+        ----------
+        multi_run_args : dict[str, Any]
+            Multi-run configuration dict. Must contain ``multi_run_counts`` and
+            ``output_prefix`` keys.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            List of single-run argument dicts, one per run.
+        """
+        single_run_args = []
+        for i in range(multi_run_args["multi_run_counts"]):
+            new_args = multi_run_args.copy()
+            new_args["task_type"] = TaskType.SIMULATION_SINGLE_RUN
+            new_args["random_seed"] = random.randint(NUMPY_RANDOM_SEED_LOWER_BOUND, NUMPY_RANDOM_SEED_UPPER_BOUND)
+            new_args.pop("random_seeds", None)
+            new_args["output_prefix"] = f"{new_args['output_prefix']} run {i + 1}"
+            single_run_args.append(new_args)
+
+        return single_run_args
+
+    def _expand_sensitivity_analysis_args(self, multi_run_args: dict[str, Any]) -> list[dict[str, Any]]:
+        """
+        Expands a sensitivity analysis multi-run argument dict into a list of
+        single-run argument dicts.
+
+        Parameters
+        ----------
+        multi_run_args : dict[str, Any]
+            Sensitivity analysis configuration dict.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            List of single-run argument dicts, one per selected sample.
+
+        Raises
+        ------
+        ValueError
+            If the specified sampler is not one of ``"fractional_factorial"``,
+            ``"sobol"``, or ``"morris"``.
+
+        Notes
+        -----
+        Required keys in ``multi_run_args``:
+
+        - ``SA_input_variables`` : list[dict] — each entry must contain
+          ``variable_name``, ``lower_bound``, ``upper_bound``, and ``data_type``
+          (``"float"`` or ``"int"``).
+        - ``sampler`` : str — one of ``"fractional_factorial"``, ``"sobol"``,
+          or ``"morris"``.
+        - ``sampler_n`` : int — number of samples; required for ``"sobol"`` and
+          ``"morris"`` samplers.
+        - ``skip_values`` : int — number of initial Sobol sequence values to skip;
+          required for ``"sobol"`` sampler.
+        - ``random_seeds`` : list[int] — random seeds available to the task. The first
+            seed is used to initialize the sensitivity analysis sampler and is assigned
+            to each expanded simulation run.
+        - ``SA_load_balancing_start`` : float — fractional start of the sample
+          range to process (0.0–1.0).
+        - ``SA_load_balancing_stop`` : float — fractional end of the sample range
+          to process (0.0–1.0).
+        - ``output_prefix`` : str — base prefix for output file names, suffixed
+          with the zero-padded run number.
+
+        Samples the input variable space using the specified sampler, applies load
+        balancing to select a subset of samples, then builds one single-run dict per
+        sample with an ``input_patch`` containing the sampled variable values.
+        """
+
+        SA_input_variables: list[dict[str, float | str]] = multi_run_args["SA_input_variables"]
+
+        names: list[str] = [str(input_variable["variable_name"]) for input_variable in SA_input_variables]
+        variables_count = len(names)
+        bounds: list[list[float]] = [
+            [float(input_variable["lower_bound"]), float(input_variable["upper_bound"])]
+            for input_variable in SA_input_variables
+        ]
+        parsed_SA_input_variables = {
+            "num_vars": variables_count,
+            "names": names,
+            "bounds": bounds,
+            "sample_scaled": True,
+        }
+
+        data_type_str_to_class_map = {"float": float, "int": int}
+        data_types = [data_type_str_to_class_map[input_variable["data_type"]] for input_variable in SA_input_variables]
+        random_seed = multi_run_args["random_seeds"][0]
+
+        if multi_run_args["sampler"] == "fractional_factorial":
+            sampled_values = fractional_factorial_sampler.sample(parsed_SA_input_variables, seed=random_seed)
+        elif multi_run_args["sampler"] == "sobol":
+            sampled_values = sobol_sampler.sample(
+                parsed_SA_input_variables,
+                multi_run_args["sampler_n"],
+                skip_values=multi_run_args["skip_values"],
+                seed=random_seed,
+            )
+        elif multi_run_args["sampler"] == "morris":
+            sampled_values = morris_sampler.sample(
+                parsed_SA_input_variables, multi_run_args["sampler_n"], seed=random_seed
+            )
+        else:
+            self.output_manager.add_log(
+                "Invalid sampler",
+                f"The sampler {multi_run_args['sampler']} is not supported",
+                {
+                    "class": TaskManager.__name__,
+                    "function": TaskManager.task.__name__,
+                    "units": MeasurementUnits.UNITLESS,
+                    "output_prefix": multi_run_args["output_prefix"],
+                },
+            )
+            raise ValueError(f"INVALID SAMPLER: The sampler {multi_run_args['sampler']} is not supported")
+
+        single_run_args = []
+
+        digits = len(str(len(sampled_values)))
+        start_sample = int(multi_run_args["SA_load_balancing_start"] * len(sampled_values))
+        stop_sample = int(multi_run_args["SA_load_balancing_stop"] * len(sampled_values))
+
+        for sample_number in range(start_sample, stop_sample):
+            new_args = multi_run_args.copy()
+            new_args["task_type"] = TaskType.SIMULATION_SINGLE_RUN
+            new_args["random_seed"] = random_seed
+            new_args.pop("random_seeds", None)
+            run_number = f"{sample_number + 1}".zfill(digits)
+            new_args["output_prefix"] = f"{new_args['output_prefix']} run {run_number}"
+            new_args["input_patch"] = {
+                names[variable_number]: data_types[variable_number](sampled_values[sample_number, variable_number])
+                for variable_number in range(variables_count)
+            }
+            new_args["input_patch"] = Utility.flatten_keys_to_nested_structure(new_args["input_patch"])
+            single_run_args.append(new_args)
+
+        return single_run_args
+
+    def _expand_end_to_end_testing_args(
+        self,
+        e2e_args: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """
+        Expands an E2E testing argument dictionary into one runnable argument dictionary per random seed.
+
+        Parameters
+        ----------
+        e2e_args : dict[str, Any]
+            E2E testing configuration dictionary. Must contain ``output_prefix`` and ``random_seeds`` keys.
+
+        Notes
+        -----
+        Each expanded dictionary is a copy of the original E2E arguments configured for a single simulation run. The
+        ``random_seeds`` list is replaced by the run's ``random_seed``, the original output prefix is retained as the
+        ``e2e_group``, and the run number is used to create a unique ``output_prefix`` for the simulation.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            List of runnable E2E simulation argument dictionaries, one per configured random seed. Each dictionary
+            contains the individual ``random_seed``, its ``e2e_group`` and ``e2e_run_number``, and a unique
+            ``output_prefix``.
+        """
+        expanded_args = []
+
+        base_output_prefix = e2e_args["output_prefix"]
+
+        for run_number, random_seed in enumerate(e2e_args["random_seeds"], start=1):
+            new_args = e2e_args.copy()
+
+            new_args["random_seed"] = random_seed
+            new_args.pop("random_seeds", None)
+            new_args["e2e_group"] = base_output_prefix
+            new_args["e2e_run_number"] = run_number
+            new_args["output_prefix"] = f"{base_output_prefix}_run_{run_number}"
+
+            expanded_args.append(new_args)
+
+        return expanded_args
+
+    def _run_tasks(
+        self,
+        single_run_args: list[dict[str, Any]],
+        produce_graphics: bool,
+        metadata_depth_limit: int,
+        workers: int,
+        metadata_path: Path,
+        output_directory: Path,
+        verbosity: LogVerbosity | None,
+    ) -> list[str]:
+        """
+        Runs all single-run tasks, in parallel if a process pool is available.
+
+        Parameters
+        ----------
+        single_run_args : list[dict[str, Any]]
+            List of argument dicts, one per single-run task.
+        produce_graphics : bool
+            Whether to produce graphics output for each run.
+        metadata_depth_limit : int
+            Maximum allowed metadata nesting depth.
+        workers : int
+            Number of worker processes.
+        metadata_path : Path
+            Path to the metadata file.
+        output_directory : Path
+            Directory where task outputs will be written.
+        verbosity : LogVerbosity or None
+            Log verbosity level for each run.
+
+        Returns
+        -------
+        list[str]
+            The failed tasks, each as ``"{output_prefix} ({task_id})"``. Empty when every task succeeded.
+
+        Notes
+        -----
+        Failed tasks are collected and reported as an error via the ``OutputManager``.
+        """
+        task_with_args = partial(
+            self.task,
+            produce_graphics=produce_graphics,
+            metadata_depth_limit=metadata_depth_limit,
+            workers=workers,
+            metadata_path=metadata_path,
+            output_directory=output_directory,
+            verbosity=verbosity,
+        )
+        if self.pool is not None:
+            results = self.pool.map(task_with_args, single_run_args)
+        else:
+            results = list(map(task_with_args, single_run_args))
+        failed = []
+        for result in results:
+            if result is not None:
+                failed.append(result)
+
+        if len(failed) > 0:
+            info_map = {"class": TaskManager.__name__, "function": TaskManager._run_tasks.__name__}
+            om = OutputManager()
+            om.add_error("Task(s) failed", f"Failed task(s) and output prefix are: {failed}", info_map)
+        return failed
+
+    @staticmethod
+    def call_handler(
+        handler: Callable[..., None],
+        args: dict[str, Any],
+        input_manager: InputManager,
+        output_manager: OutputManager,
+        task_id: Any,
+        produce_graphics: bool,
+        should_flush_im_pool: bool,
+    ) -> None:
+        """
+        Calls a task handler with the provided arguments.
+
+        Parameters
+        ----------
+        handler : Callable[..., None]
+            Task handler function to invoke.
+        args : dict[str, Any]
+            Task-specific arguments passed to the handler.
+        input_manager : InputManager
+            ``InputManager`` instance passed to the handler.
+        output_manager : OutputManager
+            ``OutputManager`` instance passed to the handler.
+        task_id : Any
+            Identifier of the current task.
+        produce_graphics : bool
+            Whether to produce graphics output.
+        should_flush_im_pool : bool
+            Whether the handler should flush the ``InputManager`` pool after execution.
+        """
+        handler(args, input_manager, output_manager, task_id, produce_graphics, should_flush_im_pool)
+
+    @staticmethod
+    def task(
+        args: dict[str, Any],
+        produce_graphics: bool,
+        workers: int,
+        metadata_depth_limit: int | None,
+        metadata_path: Path,
+        output_directory: Path,
+        verbosity: LogVerbosity | None,
+    ) -> str | None:
+        """
+        Executes a single task with the specified arguments.
+
+        Parameters
+        ----------
+        args : dict[str, Any]
+            Task arguments. Must include ``task_id``, ``task_type``,
+            ``output_prefix``, ``log_verbosity``, ``exclude_info_maps``,
+            ``chunkification``, ``maximum_memory_usage_percent``,
+            ``maximum_memory_usage``, ``save_chunk_threshold_call_count``,
+            ``filters_directory``, ``random_seeds``, and ``logs_directory``.
+        produce_graphics : bool
+            Whether to produce graphics output for the task.
+        workers : int
+            Total number of worker processes, used to partition memory limits.
+        metadata_depth_limit : int or None
+            Maximum allowed metadata nesting depth passed to the InputManager.
+        metadata_path : Path
+            Path to the metadata file.
+        output_directory : Path
+            Directory where task outputs will be written.
+        verbosity : LogVerbosity or None
+            Log verbosity override. If ``None``, the value from ``args`` is used.
+
+        Returns
+        -------
+        str or None
+            ``None`` on success. A string of the form
+            ``"{output_prefix} ({task_id})"`` if the task fails with an
+            unrecoverable exception.
+
+        Notes
+        -----
+        This function initializes the ``OutputManager`` and ``InputManager``, routes the task to the
+        appropriate handler based on task type, and returns a failure identifier
+        if an unrecoverable error occurs.
+
+        For simulation and analysis task types, input data is validated before
+        the handler is invoked. If validation fails, post-processing is run and
+        the task exits without executing the main handler.
+        """
+        info_map = {
+            "class": TaskManager.__name__,
+            "function": TaskManager.task.__name__,
+            "units": MeasurementUnits.UNITLESS,
+        }
+        task_id = args["task_id"]
+        output_manager = OutputManager()
+
+        validation_and_comparison_handlers = {
+            TaskType.INPUT_DATA_AUDIT: TaskManager._handle_input_data_audit_tasks,
+            TaskType.COMPARE_METADATA_PROPERTIES: TaskManager._handle_compare_metadata_properties_tasks,
+        }
+        simulation_and_analysis_handlers = {
+            TaskType.HERD_INITIALIZATION: TaskManager._handle_herd_init_tasks,
+            TaskType.SIMULATION_SINGLE_RUN: TaskManager._handle_simulation_engine_run_tasks,
+            TaskType.POST_PROCESSING: TaskManager._handle_postprocessing_tasks,
+            TaskType.END_TO_END_TESTING: TaskManager._run_end_to_end_testing_simulation,
+            TaskType.DATA_COLLECTION_APP_UPDATE: TaskManager._handle_data_collection_app_update,
+            TaskType.UPDATE_E2E_TEST_RESULTS: TaskManager._handle_update_e2e_test_results,
+        }
+        try:
+            task_type: TaskType = args["task_type"]
+            is_end_to_end_test = (
+                True if task_type in [TaskType.END_TO_END_TESTING, TaskType.UPDATE_E2E_TEST_RESULTS] else False
+            )
+            should_flush_im_pool = (
+                False if task_type in [TaskType.END_TO_END_TESTING, TaskType.UPDATE_E2E_TEST_RESULTS] else True
+            )
+            output_manager.run_startup_sequence(
+                verbosity=LogVerbosity(args["log_verbosity"]) if verbosity is None else verbosity,
+                exclude_info_maps=args["exclude_info_maps"],
+                output_directory=output_directory,
+                clear_output_directory=False,
+                chunkification=args["chunkification"],
+                max_memory_usage_percent=int(args["maximum_memory_usage_percent"] / workers),
+                max_memory_usage=int(args["maximum_memory_usage"] / workers),
+                save_chunk_threshold_call_count=args["save_chunk_threshold_call_count"],
+                variables_file_path=Path(""),
+                output_prefix=args["output_prefix"],
+                task_id=task_id,
+                is_end_to_end_testing_run=is_end_to_end_test,
+            )
+            input_manager = InputManager(metadata_depth_limit)
+
+            handler = validation_and_comparison_handlers.get(task_type)
+            if handler:
+                TaskManager.call_handler(
+                    handler,
+                    args=args,
+                    input_manager=input_manager,
+                    output_manager=output_manager,
+                    task_id=task_id,
+                    produce_graphics=produce_graphics,
+                    should_flush_im_pool=should_flush_im_pool,
+                )
+                return None
+
+            is_data_valid = TaskManager.handle_input_data_audit(args, input_manager, output_manager, True)
+
+            if not is_data_valid:
+                output_manager.add_error(
+                    "No task run",
+                    f"Data not valid for {args['output_prefix']}, task not run",
+                    info_map,
+                )
+                TaskManager.handle_post_processing(args, input_manager, output_manager, task_id, False)
+                return None
+
+            filters_path = Path(args["filters_directory"])
+            output_manager.validate_filter_constant_content(filters_path)
+
+            TaskManager.set_random_seed(args["random_seed"], output_manager)
+
+            handler = simulation_and_analysis_handlers.get(task_type)
+            if handler:
+                TaskManager.call_handler(
+                    handler,
+                    args=args,
+                    input_manager=input_manager,
+                    output_manager=output_manager,
+                    task_id=task_id,
+                    produce_graphics=produce_graphics,
+                    should_flush_im_pool=should_flush_im_pool,
+                )
+                return None
+            return None
+
+        except Exception as e:
+            output_prefix = args["output_prefix"]
+            info_map.update(args)
+            output_manager.add_error(
+                f"Failed to finish task: {task_id} with output prefix: {output_prefix}",
+                f"Failed to recover from error: {e}; traceback: {traceback.format_exc()}",
+                info_map,
+            )
+            output_manager.dump_all_nondata_pools(args["logs_directory"], args["exclude_info_maps"], "block")
+            output_manager.add_log(
+                "Early termination", "Unexpected early termination. Please see logs for details.", info_map
+            )
+            return f"{output_prefix} ({task_id})"
+
+    @staticmethod
+    def handle_herd_initialization(args: dict[str, Any], output_manager: OutputManager) -> None:
+        """
+        Handles initialization of the herd based on the specified arguments.
+
+        Parameters
+        ----------
+        args : dict[str, Any]
+            Task arguments. Must include ``init_herd``, ``save_animals``, and
+            ``save_animals_directory``.
+        output_manager : OutputManager
+            ``OutputManager`` instance used for logging.
+        """
+        info_map = {
+            "class": TaskManager.__name__,
+            "function": TaskManager.handle_herd_initialization.__name__,
+            "units": MeasurementUnits.UNITLESS,
+        }
+        output_manager.add_log("Herd initialization start", "Initializing herd data...", info_map)
+        herd_factory = HerdFactory(args["init_herd"], args["save_animals"], args["save_animals_directory"])
+        herd_factory.initialize_herd()
+        output_manager.add_log("Herd initialization complete", "Herd data initialized.", info_map)
+
+    @staticmethod
+    def handle_single_simulation_run(args: dict[str, Any], output_manager: OutputManager) -> None:
+        """
+        Conducts a single simulation run based on the provided arguments.
+
+        Parameters
+        ----------
+        args : dict[str, Any]
+            Simulation run arguments. Must contain ``simulation_type``, a string
+            identifying the type of simulation to run.
+        output_manager : OutputManager
+            ``OutputManager`` instance used for logging and error reporting.
+
+        Raises
+        ------
+        ValueError
+            If ``simulation_type`` is missing from ``args``.
+        """
+        info_map = {
+            "class": TaskManager.__name__,
+            "function": TaskManager.handle_single_simulation_run.__name__,
+            "units": MeasurementUnits.UNITLESS,
+        }
+
+        simulation_type_str = args.get("simulation_type")
+        if not simulation_type_str:
+            output_manager.add_error(
+                "Missing simulation type",
+                "No simulation type provided for simulation run task.",
+                info_map,
+            )
+            raise ValueError("Missing simulation type for simulation run task.")
+        simulation_type = SimulationType.get_simulation_type(simulation_type_str)
+
+        output_manager.add_log("Starting the simulation", "Starting the simulation", info_map)
+
+        if simulation_type.simulate_animals:
+            TaskManager.handle_herd_initialization(args, output_manager)
+
+        simulator = SimulationEngine(simulation_type=simulation_type)
+        simulator.simulate()
+
+        output_manager.add_log("Simulation completed", "Simulation completed", info_map)
+
+    def _group_end_to_end_testing_runs(self, runnable_args: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        """Helper function to group together end to end testing runs by simulation type."""
+        e2e_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for args in runnable_args:
+            if args["task_type"] == TaskType.END_TO_END_TESTING:
+                e2e_groups[args["e2e_group"]].append(args)
+        return e2e_groups
+
+    def _run_end_to_end_testing_comparisons(
+        self,
+        comparison_args: list[dict[str, Any]],
+        produce_graphics: bool,
+        metadata_depth_limit: int,
+        workers: int,
+        output_directory: Path,
+        verbosity: LogVerbosity | None,
+    ) -> bool:
+        """
+        Runs all E2E result averaging and comparison tasks, in parallel if a process pool is available.
+
+        Parameters
+        ----------
+        comparison_args : list[dict[str, Any]]
+            List of argument dictionaries, one per E2E group to average and compare. Each dictionary contains the E2E
+            group name, its completed simulation runs, and the task identifier for the comparison.
+        produce_graphics : bool
+            Whether to produce graphics output for each E2E comparison.
+        metadata_depth_limit : int
+            Maximum allowed metadata nesting depth.
+        workers : int
+            Number of worker processes available for E2E result processing.
+        output_directory : Path
+            Directory containing the E2E simulation outputs and where comparison outputs will be written.
+        verbosity : LogVerbosity or None
+            Log verbosity level for each E2E comparison.
+
+        Returns
+        -------
+        bool
+            Whether the E2E results comparisons were successfully completed.
+
+        Notes
+        -----
+        Each E2E group is processed independently by ``_process_end_to_end_testing_group``, which averages the results
+        from the group's simulation runs and compares the averaged results against the expected E2E results. Failed
+        comparison tasks are collected and reported as an error via the ``OutputManager``.
+        """
+
+        comparison_with_args = partial(
+            self._process_end_to_end_testing_group,
+            produce_graphics=produce_graphics,
+            metadata_depth_limit=metadata_depth_limit,
+            workers=workers,
+            output_directory=output_directory,
+            verbosity=verbosity,
+        )
+
+        if self.pool is not None:
+            results = self.pool.map(
+                comparison_with_args,
+                comparison_args,
+            )
+        else:
+            results = list(
+                map(
+                    comparison_with_args,
+                    comparison_args,
+                )
+            )
+
+        failed = [result for result in results if result is not None]
+
+        if failed:
+            self.output_manager.add_error(
+                "E2E comparison task(s) failed",
+                f"Failed E2E comparison task(s): {failed}",
+                {
+                    "class": TaskManager.__name__,
+                    "function": (self._run_end_to_end_testing_comparisons.__name__),
+                },
+            )
+            return False
+
+        return True
+
+    @staticmethod
+    def _process_end_to_end_testing_group(
+        comparison_args: dict[str, Any],
+        produce_graphics: bool,
+        metadata_depth_limit: int,
+        workers: int,
+        output_directory: Path,
+        verbosity: LogVerbosity | None,
+    ) -> str | None:
+        """
+        Processes the completed simulation results for one E2E testing group.
+
+        Parameters
+        ----------
+        comparison_args : dict[str, Any]
+            Arguments for the E2E group being processed. Must contain ``e2e_group``, ``e2e_runs``, and ``task_id``. The
+            ``e2e_runs`` value contains the completed simulation run configurations whose results will be averaged.
+        produce_graphics : bool
+            Whether to produce graphics during E2E post-processing.
+        metadata_depth_limit : int
+            Maximum allowed metadata nesting depth used when initializing the ``InputManager``.
+        workers : int
+            Number of worker processes used to determine the memory limits available to this E2E processing task.
+        output_directory : Path
+            Directory containing the E2E simulation outputs and where comparison outputs will be written.
+        verbosity : LogVerbosity or None
+            Log verbosity level for the E2E group. If ``None``, the verbosity configured in the E2E run arguments is
+            used.
+
+        Notes
+        -----
+        Initializes the input and output managers for the E2E group, validates the group's input data, averages the
+        results from its individual simulation runs, compares the averaged results against the expected E2E results,
+        and performs post-processing. Any exception raised during averaging, comparison, or post-processing is logged
+        and reported as a failed E2E group.
+
+        Returns
+        -------
+        str or None
+            The E2E group name if input validation, averaging, comparison, or post-processing fails; otherwise
+            ``None``.
+        """
+
+        e2e_group: str = comparison_args["e2e_group"]
+        e2e_runs: list[dict[str, Any]] = comparison_args["e2e_runs"]
+        task_id: str = comparison_args["task_id"]
+
+        group_args = e2e_runs[0].copy()
+        group_args["output_prefix"] = e2e_group
+
+        output_manager = OutputManager()
+        output_manager.run_startup_sequence(
+            verbosity=LogVerbosity(group_args["log_verbosity"]) if verbosity is None else verbosity,
+            exclude_info_maps=group_args["exclude_info_maps"],
+            output_directory=output_directory,
+            clear_output_directory=False,
+            chunkification=group_args["chunkification"],
+            max_memory_usage_percent=int(group_args["maximum_memory_usage_percent"] / workers),
+            max_memory_usage=int(group_args["maximum_memory_usage"] / workers),
+            save_chunk_threshold_call_count=group_args["save_chunk_threshold_call_count"],
+            variables_file_path=Path(""),
+            output_prefix=group_args["output_prefix"],
+            task_id=task_id,
+            is_end_to_end_testing_run=True,
+        )
+        input_manager = InputManager(metadata_depth_limit)
+
+        im_args = e2e_runs[0]
+
+        is_data_valid = TaskManager.handle_input_data_audit(im_args, input_manager, output_manager, True)
+
+        if not is_data_valid:
+            output_manager.add_error(
+                "No task run",
+                f"Data not valid for {e2e_group}, task not run",
+                info_map={
+                    "class": TaskManager.__name__,
+                    "function": TaskManager._process_end_to_end_testing_group.__name__,
+                    "units": MeasurementUnits.UNITLESS,
+                },
+            )
+            TaskManager.handle_post_processing(comparison_args, input_manager, output_manager, task_id, False)
+            return e2e_group
+
+        try:
+            averaged_results_path = E2ETestResultsHandler.process_test_result_averaging(
+                e2e_group=e2e_group,
+                e2e_runs=e2e_runs,
+            )
+
+            output_manager.is_first_post_processing = False
+
+            must_change_variables, accepted_ranges = E2ETestResultsHandler.validate_comparison_configuration(
+                group_args["output_prefix"],
+                group_args["convert_variable_table_path"],
+                group_args["filters_directory"],
+                group_args["use_accepted_ranges"],
+            )
+
+            E2ETestResultsHandler.compare_actual_and_expected_test_results(
+                json_output_path=averaged_results_path,
+                convert_variable_table_path=group_args["convert_variable_table_path"],
+                output_prefix=e2e_group,
+                must_change_variables=must_change_variables,
+                accepted_ranges=accepted_ranges,
+            )
+
+            TaskManager.handle_post_processing(
+                args=group_args,
+                input_manager=input_manager,
+                output_manager=output_manager,
+                task_id=task_id,
+                should_flush_im_pool=True,
+                produce_graphics=produce_graphics,
+                save_results=True,
+            )
+
+            return None
+
+        except Exception as e:
+            info_map = {
+                "class": TaskManager.__name__,
+                "function": TaskManager._process_end_to_end_testing_group.__name__,
+            }
+
+            output_manager.add_error(
+                f"E2E comparison failed for {e2e_group}",
+                (f"Failed to average and compare E2E results: {e}; " f"traceback: {traceback.format_exc()}"),
+                info_map,
+            )
+
+            output_manager.dump_all_nondata_pools(
+                group_args["logs_directory"],
+                group_args["exclude_info_maps"],
+                "block",
+            )
+
+            return e2e_group
+
+    @staticmethod
+    def _run_end_to_end_testing_simulation(
+        args: dict[str, Any],
+        input_manager: InputManager,
+        output_manager: OutputManager,
+        task_id: str,
+        produce_graphics: bool,
+        should_flush_im_pool: bool,
+    ) -> None:
+        """Runs a simulation as part of end-to-end testing.
+
+        Parameters
+        ----------
+        args : dict[str, Any]
+            The arguments used to configure the simulation.
+        input_manager : InputManager
+            The input manager associated with the simulation.
+        output_manager : OutputManager
+            The output manager associated with the simulation.
+        task_id : str
+            The identifier for the E2E simulation task.
+        produce_graphics : bool
+            Whether graphics should be generated for the simulation.
+        should_flush_im_pool : bool
+            Whether the InputManager pool should be flushed during simulation processing.
+
+        Notes
+        -----
+        Logs the start and completion of the E2E simulation and delegates the simulation execution to the standard
+        simulation engine task handler. Averaging and comparison of E2E results are performed separately after all
+        simulations in the E2E group have completed.
+        """
+        info_map = {
+            "class": TaskManager.__name__,
+            "function": TaskManager._run_end_to_end_testing_simulation.__name__,
+            "task_id": task_id,
+            "produce_graphics": produce_graphics,
+        }
+
+        output_manager.add_log("End-to-end testing", "Starting simulation for end-to-end testing.", info_map)
+        TaskManager._handle_simulation_engine_run_tasks(
+            args=args,
+            input_manager=input_manager,
+            output_manager=output_manager,
+            task_id=task_id,
+            produce_graphics=produce_graphics,
+            should_flush_im_pool=should_flush_im_pool,
+        )
+
+        output_manager.add_log("End-to-end testing", "Completed simulation for end-to-end testing", info_map)
+
+    @staticmethod
+    def _handle_update_e2e_test_results(
+        args: dict[str, Any],
+        input_manager: InputManager,
+        output_manager: OutputManager,
+        task_id: str,
+        produce_graphics: bool,
+        should_flush_im_pool: bool,
+    ) -> None:
+        """Validates the update configuration, then generates a new set of end-to-end expected test results."""
+        info_map = {
+            "class": TaskManager.__name__,
+            "function": TaskManager._handle_update_e2e_test_results.__name__,
+        }
+
+        E2ETestResultsHandler.validate_update_configuration(args["output_prefix"], args["filters_directory"])
+
+        output_manager.add_log(
+            "End-to-end testing", "Generating new set of end-to-end expected test results.", info_map
+        )
+
+        TaskManager._handle_simulation_engine_run_tasks(
+            args=args,
+            input_manager=input_manager,
+            output_manager=output_manager,
+            task_id=task_id,
+            produce_graphics=produce_graphics,
+            should_flush_im_pool=should_flush_im_pool,
+        )
+
+        E2ETestResultsHandler.update_expected_test_results(args["json_output_directory"], args["output_prefix"])
+
+        output_manager.add_log(
+            "End-to-end testing", "Completed generation of new set of end-to-end expected test results", info_map
+        )
+
+    @staticmethod
+    def handle_input_data_audit(
+        args: dict[str, Any], input_manager: InputManager, output_manager: OutputManager, eager_termination: bool
+    ) -> bool:
+        """
+        Validates input data and optionally saves metadata properties and exports
+        input data to CSV.
+
+        Parameters
+        ----------
+        args : dict[str, Any]
+            Task arguments. Must include ``metadata_file_path``, ``input_root``,
+            ``task_id``, ``output_prefix``, ``logs_directory``,
+            ``suppress_log_files``, and ``export_input_data_to_csv``. Optionally
+            includes ``cross_validation_file_paths``.
+        input_manager : InputManager
+            ``InputManager`` instance used to process and validate input data.
+        output_manager : OutputManager
+            ``OutputManager`` instance used for logging.
+        eager_termination : bool
+            Whether to stop validation on the first error encountered.
+
+        Returns
+        -------
+        bool
+            ``True`` if input data is valid, ``False`` otherwise.
+        """
+        info_map = {
+            "class": TaskManager.__name__,
+            "function": TaskManager.handle_input_data_audit.__name__,
+            "units": MeasurementUnits.UNITLESS,
+        }
+        output_manager.add_log("Validation start", f"Validating data for {args['metadata_file_path']}...", info_map)
+        cross_validation_file_paths: list[str] | None = args.get("cross_validation_file_paths", None)
+        is_data_valid = input_manager.start_data_processing(
+            Path(args["metadata_file_path"]),
+            Path(args["input_root"]),
+            args["task_id"],
+            cross_validation_file_paths,
+            eager_termination,
+        )
+        output_manager.add_log(
+            "Validation complete", f"{args['output_prefix']} validation status: {is_data_valid}", info_map
+        )
+
+        if not args["suppress_log_files"]:
+            output_manager.add_log(
+                "Saving metadata properties",
+                f"Saving metadata properties {args['metadata_file_path']} at {args['logs_directory']}",
+                info_map,
+            )
+            input_manager.save_metadata_properties(args["logs_directory"])
+
+        if args["export_input_data_to_csv"]:
+            input_manager.export_pool_to_csv(args["output_prefix"], TaskManager.INPUT_DATA_CSV_WORKING_FOLDER)
+
+        return is_data_valid
+
+    @staticmethod
+    def handle_post_processing(
+        args: dict[str, Any],
+        input_manager: InputManager,
+        output_manager: OutputManager,
+        task_id: str,
+        should_flush_im_pool: bool,
+        produce_graphics: bool = False,
+        save_results: bool = False,
+        load_pool_from_file: bool = False,
+        export_input_data_to_csv: bool = False,
+    ) -> None:
+        """
+        Handles post-processing tasks based on specified arguments.
+
+        Parameters
+        ----------
+        args : dict[str, Any]
+            Arguments for post-processing.
+        input_manager : InputManager
+            Manager to handle input processing.
+        output_manager : OutputManager
+            Manager to handle output logging and errors.
+        task_id: str
+            The ID that Task Manager has assigned to this task.
+        produce_graphics : bool
+            Whether to produce graphics during post-processing.
+        save_results : bool
+            Whether to save results after processing.
+        load_pool_from_file : bool
+            Whether to load data pool from file.
+        export_input_data_to_csv: bool
+            Whether to export the input data to a CSV file.
+        should_flush_im_pool: bool
+            Whether to flush the ``InputManager`` pool.
+
+        Notes
+        -----
+        - For args, when the optional ``run_eee`` key is set to ``True``, the Emissions, Energy, and Economics
+        estimators are executed before the remaining post-processing steps. When ``load_saved_output_pools`` is
+        ``True`` the saved pools defined in ``saved_output_pools`` are loaded and namespaced prior to
+        post-processing.
+        """
+        info_map = {
+            "class": TaskManager.__name__,
+            "function": TaskManager.handle_post_processing.__name__,
+            "units": MeasurementUnits.UNITLESS,
+        }
+        output_manager.add_log("Validation counts", f"{str(input_manager.elements_counter)}", info_map)
+
+        if args.get("run_eee", False):
+            pass
+            # TODO update path to `RUFAS.EEE.EEE_manager` when EEE is finalized and moved in either PR #2524 or #1299
+            # TODO update to be able to run EEE once farmgrown feed emissions are finalized #2580
+            # eee_manager_module = import_module("RUFAS.routines.EEE.EEE_manager")
+            # eee_manager_module.EEEManager.estimate_all()
+
+        if export_input_data_to_csv:
+            output_manager.create_directory(args["input_data_csv_export_path"])
+            Utility.combine_saved_input_csv(
+                TaskManager.INPUT_DATA_CSV_WORKING_FOLDER,
+                args["input_data_csv_export_path"],
+                args["input_data_csv_import_path"],
+            )
+
+        if args.get("load_saved_output_pools", False):
+            saved_pools: list[dict[str, Any]] = args.get("saved_output_pools", [])
+            if saved_pools:
+                output_manager.flush_pools()
+                output_manager.load_multiple_variables_pools_from_files(saved_pools)
+                output_manager.set_metadata_prefix("reload")
+            else:
+                output_manager.add_warning(
+                    "No saved pools provided",
+                    "load_saved_output_pools was enabled, but no saved_output_pools were supplied.",
+                    info_map,
+                )
+        elif load_pool_from_file:
+            output_manager.flush_pools()
+            output_manager.load_variables_pool_from_file(args["output_pool_path"])
+            output_manager.set_metadata_prefix("reload")
+
+        output_manager.print_errors_warnings_logs_counts(task_id, args["output_prefix"])
+        if should_flush_im_pool:
+            input_manager.flush_pool()
+        if args.get("task_type") == TaskType.POST_PROCESSING:
+            save_results = True
+            produce_graphics = True
+        if save_results:
+            output_manager.save_results(
+                args["filters_directory"],
+                args["exclude_info_maps"],
+                produce_graphics,
+                args["report_directory"],
+                args["graphics_directory"],
+                args["csv_output_directory"],
+                args["json_output_directory"],
+            )
+
+        if not args["suppress_log_files"]:
+            input_manager.dump_get_data_logs(args["logs_directory"])
+            input_manager.dump_delete_data_logs(args["logs_directory"])
+            output_manager.dump_all_nondata_pools(
+                args["logs_directory"], args["exclude_info_maps"], args["variable_name_style"]
+            )
+
+    @staticmethod
+    def set_random_seed(random_seed: int | None, output_manager: OutputManager) -> None:
+        """
+        Sets the random seed for both the ``random`` and ``numpy.random`` modules.
+
+        If ``random_seed`` is ``0``, a random seed is generated within the valid
+        NumPy seed range before being applied.
+
+        Parameters
+        ----------
+        random_seed : int or None
+            Seed value to apply. If ``0``, a random seed is generated instead.
+        output_manager : OutputManager
+            ``OutputManager`` instance used for logging and recording the seed used.
+        """
+        info_map: dict[str, str | MeasurementUnits] = {
+            "class": TaskManager.__name__,
+            "function": TaskManager.set_random_seed.__name__,
+            "units": MeasurementUnits.UNITLESS,
+        }
+        output_manager.add_log("Random seed received", f"Received {random_seed} as random seed.", info_map)
+        if random_seed == 0:
+            random_seed = random.randint(NUMPY_RANDOM_SEED_LOWER_BOUND, NUMPY_RANDOM_SEED_UPPER_BOUND)
+
+        random.seed(random_seed)
+        numpy.random.seed(random_seed)
+
+        output_manager.add_variable("random_seed", random_seed, info_map)
+        output_manager.add_log("Random seed used", f"Seeded libaries with {random_seed=}", info_map)
+
+    @staticmethod
+    def _handle_input_data_audit_tasks(
+        args: dict[str, Any],
+        input_manager: InputManager,
+        output_manager: OutputManager,
+        task_id: Any,
+        produce_grahics: bool,
+        should_flush_im_pool: bool,
+    ) -> None:
+        """Handler for input data audit tasks."""
+        TaskManager.handle_input_data_audit(
+            args=args, input_manager=input_manager, output_manager=output_manager, eager_termination=False
+        )
+        TaskManager.handle_post_processing(
+            args=args,
+            input_manager=input_manager,
+            output_manager=output_manager,
+            task_id=task_id,
+            should_flush_im_pool=should_flush_im_pool,
+        )
+
+    @staticmethod
+    def _handle_compare_metadata_properties_tasks(
+        args: dict[str, Any],
+        input_manager: InputManager,
+        output_manager: OutputManager,
+        task_id: Any,
+        produce_grahics: bool,
+        should_flush_im_pool: bool,
+    ) -> None:
+        """Handler for all methods related to metadata property comparison."""
+        input_manager.compare_metadata_properties(
+            args["properties_file_path"], args["comparison_properties_file_path"], args["logs_directory"]
+        )
+
+    @staticmethod
+    def _handle_herd_init_tasks(
+        args: dict[str, Any],
+        input_manager: InputManager,
+        output_manager: OutputManager,
+        task_id: Any,
+        produce_grahics: bool,
+        should_flush_im_pool: bool,
+    ) -> None:
+        """Handler for all methods related to herd initialization."""
+        args["init_herd"] = True
+        TaskManager.handle_herd_initialization(args=args, output_manager=output_manager)
+        TaskManager.handle_post_processing(
+            args=args,
+            input_manager=input_manager,
+            output_manager=output_manager,
+            task_id=task_id,
+            should_flush_im_pool=should_flush_im_pool,
+        )
+
+    @staticmethod
+    def _handle_simulation_engine_run_tasks(
+        args: dict[str, Any],
+        input_manager: InputManager,
+        output_manager: OutputManager,
+        task_id: Any,
+        produce_graphics: bool,
+        should_flush_im_pool: bool,
+    ) -> None:
+        """Handler for all methods related to simulation run."""
+        if args["input_patch"]:
+            Utility.deep_merge(input_manager.pool, args["input_patch"])
+
+        args["simulation_type"] = input_manager.get_data("config.simulation_type")
+        TaskManager.handle_single_simulation_run(args, output_manager)
+        TaskManager.handle_post_processing(
+            args=args,
+            input_manager=input_manager,
+            output_manager=output_manager,
+            task_id=task_id,
+            should_flush_im_pool=should_flush_im_pool,
+            produce_graphics=produce_graphics,
+            save_results=True,
+        )
+
+    @staticmethod
+    def _handle_postprocessing_tasks(
+        args: dict[str, Any],
+        input_manager: InputManager,
+        output_manager: OutputManager,
+        task_id: Any,
+        produce_graphics: bool,
+        should_flush_im_pool: bool,
+    ) -> None:
+        """Handler for all methods related to postprocessing."""
+        TaskManager.handle_post_processing(
+            args=args,
+            input_manager=input_manager,
+            output_manager=output_manager,
+            task_id=task_id,
+            should_flush_im_pool=should_flush_im_pool,
+            produce_graphics=produce_graphics,
+        )
+
+    @staticmethod
+    def _handle_data_collection_app_update(
+        args: dict[str, Any],
+        input_manager: InputManager,
+        output_manager: OutputManager,
+        task_id: Any,
+        produce_graphics: bool,
+        should_flush_im_pool: bool,
+    ) -> None:
+        """Handler for all methods related to updating the Data Collection App."""
+        dca_updater = DataCollectionAppUpdater()
+
+        task_metadata_properties = args["task_manager_metadata_properties"]
+        dca_updater.update_data_collection_app(task_metadata_properties)

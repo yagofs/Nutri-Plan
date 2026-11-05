@@ -1,0 +1,128 @@
+import pytest
+
+from RUFAS.data_structures.manure_to_crop_soil_connection import (
+    FieldManureSupplier,
+    NutrientRequest,
+    NutrientRequestResults,
+)
+from RUFAS.data_structures.manure_types import ManureType
+
+
+@pytest.mark.parametrize(
+    "nutrients,expected_result",
+    [
+        (
+            NutrientRequest(
+                nitrogen=100.0, phosphorus=50.0, manure_type=ManureType.LIQUID, use_supplemental_manure=False
+            ),
+            NutrientRequestResults(
+                nitrogen=100,
+                phosphorus=40.909,
+                dry_matter=2090.9,
+                total_manure_mass=45454.0751,
+                dry_matter_fraction=0.046000276,
+            ),
+        ),
+        (
+            NutrientRequest(
+                nitrogen=100.0, phosphorus=40.0, manure_type=ManureType.SOLID, use_supplemental_manure=False
+            ),
+            NutrientRequestResults(
+                nitrogen=80.0005924,
+                phosphorus=40.0,
+                dry_matter=5401.32,
+                total_manure_mass=13335.85907999,
+                dry_matter_fraction=0.4050222762,
+            ),
+        ),
+        (
+            NutrientRequest(
+                nitrogen=100.0, phosphorus=0.0, manure_type=ManureType.SOLID, use_supplemental_manure=False
+            ),
+            NutrientRequestResults(
+                nitrogen=100.0,
+                phosphorus=49.99962972,
+                dry_matter=6751.6,
+                total_manure_mass=16669.7004,
+                dry_matter_fraction=0.4050222762,
+            ),
+        ),
+        (
+            NutrientRequest(
+                nitrogen=0.0, phosphorus=33.0, manure_type=ManureType.LIQUID, use_supplemental_manure=False
+            ),
+            NutrientRequestResults(
+                nitrogen=80.66684202,
+                phosphorus=33.0,
+                dry_matter=1686.663,
+                total_manure_mass=36666.366957,
+                dry_matter_fraction=0.046000276,
+            ),
+        ),
+    ],
+)
+def test_request_nutrients(nutrients: NutrientRequest, expected_result: NutrientRequestResults) -> None:
+    """Tests that manure nutrient amounts are formulated correctly."""
+    field_manure_supplier = FieldManureSupplier()
+
+    actual = field_manure_supplier.request_nutrients(nutrients)
+
+    assert pytest.approx(actual.nitrogen) == expected_result.nitrogen
+    assert pytest.approx(actual.phosphorus) == expected_result.phosphorus
+    assert pytest.approx(actual.dry_matter) == expected_result.dry_matter
+    assert pytest.approx(actual.total_manure_mass) == expected_result.total_manure_mass
+    assert pytest.approx(actual.dry_matter_fraction) == expected_result.dry_matter_fraction
+
+
+def test_nutrient_request_results_add_tolerates_floating_point_imprecision() -> None:
+    """Adding two NutrientRequestResults with default fractions can round just above 1.0; clamp must absorb it."""
+    on_farm = NutrientRequestResults(nitrogen=810.217426, phosphorus=10.0, total_manure_mass=1000.0)
+    off_farm = NutrientRequestResults(nitrogen=902.166048, phosphorus=10.0, total_manure_mass=1000.0)
+
+    combined = on_farm + off_farm
+
+    assert combined.ammonium_nitrogen_fraction == pytest.approx(1.0)
+    assert combined.nitrogen == pytest.approx(810.217426 + 902.166048)
+
+
+def test_nutrient_request_empty_without_flags_raises() -> None:
+    """A request with no nutrients and no flags is genuinely empty and must raise."""
+    with pytest.raises(ValueError, match="At least one nutrient must be requested and positive"):
+        NutrientRequest(
+            nitrogen=0.0,
+            phosphorus=0.0,
+            manure_type=ManureType.SOLID,
+            use_supplemental_manure=False,
+        )
+
+
+def test_nutrient_request_accepts_positive_nutrient_with_flags() -> None:
+    """A genuine positive nutrient still validates, regardless of the boolean flags."""
+    request = NutrientRequest(
+        nitrogen=10.0,
+        phosphorus=0.0,
+        manure_type=ManureType.SOLID,
+        use_supplemental_manure=True,
+    )
+    assert request.nitrogen == 10.0
+
+
+def test_nutrient_request_flag_driven_requests_allow_zero_nutrients() -> None:
+    """Flag-driven requests (spread-all, supplemental top-up) may legitimately carry zero nutrients."""
+    spread_all = NutrientRequest(
+        nitrogen=0.0,
+        phosphorus=0.0,
+        manure_type=ManureType.SOLID,
+        use_supplemental_manure=False,
+        spread_all_available_manure=True,
+    )
+    assert spread_all.spread_all_available_manure is True
+
+    # Mirrors the zero-shortfall request built by ManureManager._calculate_supplemental_manure_needed.
+    supplemental_sentinel = NutrientRequest(
+        nitrogen=0.0,
+        phosphorus=0.0,
+        manure_type=ManureType.SOLID,
+        use_supplemental_manure=True,
+    )
+    assert supplemental_sentinel.use_supplemental_manure is True

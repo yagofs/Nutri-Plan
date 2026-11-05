@@ -1,0 +1,11 @@
+{
+  "files": {
+    "tasks": {
+      "title": "Task manager data",
+      "description": "Configuration file for general simulation parameters.",
+      "path": "input/data/tasks/herd_init_task.json",
+      "type": "json",
+      "properties": "tasks_properties"
+    }
+  }
+}

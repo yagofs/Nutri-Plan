@@ -1,0 +1,697 @@
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from datetime import date
+from enum import Enum
+from typing import Any
+
+from RUFAS.input_manager import InputManager
+from RUFAS.units import MeasurementUnits
+from RUFAS.util import Utility
+
+"""
+Every feed in RuFaS has a unique integer ID. They are defined in the Feed Library used, and are used throughout
+other inputs and the RuFaS codebase.
+"""
+RUFAS_ID = int
+
+"""Ratio of the price of an on-farm price to the price of buying that feed from an off farm source."""
+ON_FARM_TO_PURCHASED_PRICE_RATIO = 0.01
+
+
+class FeedCategorization(Enum):
+    """NASEM and NRC categorizations of feeds."""
+
+    ANIMAL_PROTEIN = "Animal Protein"
+    BY_PRODUCT_OTHER = "By-Product/Other"
+    CALF_LIQUID_FEED = "Calf Liquid Feed"
+    ENERGY_SOURCE = "Energy Source"
+    FAT_SUPPLEMENT = "Fat Supplement"
+    FATTY_ACID_SUPPLEMENT = "Fatty Acid Supplement"
+    GRAIN_CROP_FORAGE = "Grain Crop Forage"
+    GRASS_LEGUME_FORAGE = "Grass/Legume Forage"
+    PASTURE = "Pasture"
+    PLANT_PROTEIN = "Plant Protein"
+    VITAMIN_MINERAL = "Vitamin/Mineral"
+    NPN_SUPPLEMENT = "NPN Supplement"
+
+
+class FeedComponentType(Enum):
+    """NASEM and NRC types of feeds."""
+
+    AMINOACIDS = "Aminoacids"
+    FORAGE = "Forage"
+    CONC = "Conc"
+    MILK = "Milk"
+    MINERAL = "Mineral"
+    VITAMINS = "Vitamins"
+    STARTER = "Starter"
+    NO = "No"
+
+
+class NutrientStandard(Enum):
+    """The nutrient standards supported in RuFaS."""
+
+    NASEM = "NASEM"
+    NRC = "NRC"
+
+
+@dataclass
+class Feed:
+    """
+    Base representation of a feed in RuFaS.
+
+    Attributes
+    ----------
+    rufas_id : RUFAS_ID
+        Unique integer identifier for feeds used within the RuFaS model (unitless).
+    Fd_Category : FeedCategorization
+        Feed category (unitless).
+    feed_type : FeedComponentType
+        General type or category of the feed (unitless).
+    DM : float
+        Percentage of fresh mass that is dry matter of the feed.
+    ash : float
+        Ash contents (% dry matter).
+    CP : float
+        Crude protein content of the feed (% dry matter).
+    N_A : float
+        Nitrogen Fraction A (% crude protein).
+    N_B : float
+        Nitrogen Fraction B (% crude protein).
+    N_C : float
+        Nitrogen Fraction C (% crude protein).
+    Kd : float
+        Feed degradation rate of B fraction (% per hour).
+    dRUP : float
+        Digested rumen undegradable protein (% of rumen undigestable protein).
+    ADICP : float
+        Acid detergent insoluble nitrogen multiplied by 6.25 (% dry matter).
+    NDICP : float
+        Neutral detergent insoluble nitrogen multiplied by 6.25 (% dry matter).
+    ADF : float
+        Acid detergent fiber (% dry matter).
+    NDF : float
+        Neutral detergent fiber (% dry matter).
+    lignin : float
+        Acid detergent lignin (% dry matter).
+    starch : float
+        Starch (% dry matter).
+    EE : float
+        Ether extract (% dry matter).
+    calcium : float
+        Calcium (% dry matter).
+    phosphorus : float
+        Phosphorus (% dry matter).
+    magnesium : float
+        Magnesium (% dry matter).
+    potassium : float
+        Potassium (% dry matter).
+    sodium : float
+        Sodium (% dry matter).
+    chlorine : float
+        Chlorine (% dry matter).
+    sulfur : float
+        Sulphur (% dry matter).
+    is_fat : bool
+        Identifier of fat type feed (unitless).
+    is_wetforage : bool
+        Identifier of wet forage type feed (unitless).
+    units : MeasurementUnits
+        The units with which the feed is measured (unitless).
+    limit : float
+        Upper limit of feed that is allowed to be used in a single animal's diet (kg).
+    lower_limit : float
+        Lower limit of feed that is allowed to be used in a single animal's diet (kg).
+    TDN : float
+        Total digestible nutrients (% dry matter).
+    DE : float
+        Digestible energy (Mcal / kg).
+    amount_available : float
+        Amount of feed currently or expected to be available (kg).
+    on_farm_cost : float
+        Price of using the feed that is already on-farm ($ / kg).
+    purchase_cost : float
+        Price of buying feed from off-farm ($ / kg).
+    buffer : float
+        Fraction of extra feed purchases to account for shrinkage (unitless).
+
+    """
+
+    rufas_id: RUFAS_ID
+    Fd_Category: FeedCategorization
+    feed_type: FeedComponentType
+    DM: float
+    ash: float
+    CP: float
+    N_A: float
+    N_B: float
+    N_C: float
+    Kd: float
+    dRUP: float
+    ADICP: float
+    NDICP: float
+    ADF: float
+    NDF: float
+    lignin: float
+    starch: float
+    EE: float
+    calcium: float
+    phosphorus: float
+    magnesium: float
+    potassium: float
+    sodium: float
+    chlorine: float
+    sulfur: float
+    is_fat: bool
+    is_wetforage: bool
+    units: MeasurementUnits
+    limit: float
+    lower_limit: float
+    TDN: float
+    DE: float
+    amount_available: float
+    on_farm_cost: float
+    purchase_cost: float
+    buffer: float
+
+
+@dataclass
+class NASEMFeed(Feed):
+    """
+    NASEM-specific representation of a RuFaS feed.
+
+    Attributes
+    ----------
+    Name : str
+        Feed name (unitless).
+    RUP : float
+        Rumen undegradable protein (% crude protein).
+    sol_prot : float
+        Soluble protein (% crude protein).
+    NDF48 : float
+        In vitro 48-hour digestibility (% Neutral Detergent Fiber).
+    WSC : float
+        Water soluble carbohydrates (% dry matter).
+    FA : float
+        Fatty acids (% dry matter).
+    DE_Base : float
+        Digestible energy standard (Mcal / kg).
+    copper : float
+        Copper (% dry matter).
+    iron : float
+        Iron (% dry matter).
+    manganese : float
+        Manganese (% dry matter).
+    zinc : float
+        Zinc (% dry matter).
+    molibdenum : float
+        Molibdenum (% dry matter).
+    chromium : float
+        Chromium (% dry matter).
+    cobalt : float
+        Cobalt (% dry matter).
+    iodine : float
+        Iodine (% dry matter).
+    selenium : float
+        Selenium (% dry matter).
+    arginine : float
+        Arginine (% dry matter).
+    histidine : float
+        Histidine (% dry matter).
+    isoleucine : float
+        Isoleucine (% dry matter).
+    leucine : float
+        Leucine (% dry matter).
+    lysine : float
+        Lysine (% dry matter).
+    methionine : float
+        Methionine (% dry matter).
+    phenylalanine : float
+        Phenylalanine (% dry matter).
+    threonine : float
+        Threonine (% dry matter).
+    triptophan : float
+        Triptophan (% dry matter).
+    valine : float
+        Valine (% dry matter).
+    C120_FA : float
+        C120_FA (% dry matter).
+    C140_FA : float
+        C140_FA (% dry matter).
+    C160_FA : float
+        C160_FA (% dry matter).
+    C161_FA : float
+        C161_FA (% dry matter).
+    C180_FA : float
+        C180_FA (% dry matter).
+    C181t_FA : float
+        C181t_FA (% dry matter).
+    C181c_FA : float
+        C181c_FA (% dry matter).
+    C182_FA : float
+        C182_FA (% dry matter).
+    C183_FA : float
+        C183_FA (% dry matter).
+    otherFA_FA : float
+        OtherFA_FA (% dry matter).
+    NPN_source : float
+        Non-protein nitrogen fraction (%).
+    starch_digested : float
+        Base starch digestibility (%).
+    FA_dig : float
+        FA_dig (% dry matter).
+    P_inorg : float
+        P_inorg (% dry matter).
+    P_org : float
+        P_org (% dry matter).
+    B_Carotene : float
+        B_Carotene (% dry matter).
+    biotin : float
+        Biotin (% dry matter).
+    choline : float
+        Choline (% dry matter).
+    niacin : float
+        Niacin (% dry matter).
+    Vit_A : float
+        Vita_A (% dry matter).
+    Vit_D : float
+        Vit_D (% dry matter).
+    Vit_E : float
+        Vit_E (% dry matter).
+    Abs_calcium : float
+        Abs_calcium (% dry matter).
+    Abs_phosphorus : float
+        Abs_phosphorus (% dry matter).
+    Abs_sodium : float
+        Abs_sodium (% dry matter).
+    Abs_chloride : float
+        Abs_chloride (% dry matter).
+    Abs_potassium : float
+        Abs_potassium (% dry matter).
+    Abs_copper : float
+        Abs_copper (% dry matter).
+    Abs_iron : float
+        Abs_iron (% dry matter).
+    Abs_magnesium : float
+        Abs_magnesium (% dry matter).
+    Abs_manganesum : float
+        Abs_manganesum (% dry matter).
+    Abs_zinc : float
+        Abs_zinc (% dry matter).
+
+    """
+
+    Name: str
+    RUP: float
+    sol_prot: float
+    NDF48: float
+    WSC: float
+    FA: float
+    DE_Base: float
+    copper: float
+    iron: float
+    manganese: float
+    zinc: float
+    molibdenum: float
+    chromium: float
+    cobalt: float
+    iodine: float
+    selenium: float
+    arginine: float
+    histidine: float
+    isoleucine: float
+    leucine: float
+    lysine: float
+    methionine: float
+    phenylalanine: float
+    threonine: float
+    triptophan: float
+    valine: float
+    C120_FA: float
+    C140_FA: float
+    C160_FA: float
+    C161_FA: float
+    C180_FA: float
+    C181t_FA: float
+    C181c_FA: float
+    C182_FA: float
+    C183_FA: float
+    otherFA_FA: float
+    NPN_source: float
+    starch_digested: float
+    FA_dig: float
+    P_inorg: float
+    P_org: float
+    B_Carotene: float
+    biotin: float
+    choline: float
+    niacin: float
+    Vit_A: float
+    Vit_D: float
+    Vit_E: float
+    Abs_calcium: float
+    Abs_phosphorus: float
+    Abs_sodium: float
+    Abs_chloride: float
+    Abs_potassium: float
+    Abs_copper: float
+    Abs_iron: float
+    Abs_magnesium: float
+    Abs_manganesum: float
+    Abs_zinc: float
+
+
+@dataclass
+class NRCFeed(Feed):
+    """
+    NRC-specific representation of a RuFaS feed.
+
+    Attributes
+    ----------
+    non_fiber_carb : float
+        Non fiber carbohydrates (% dry matter).
+    PAF : float
+        Processing adjustment factor.
+
+    """
+
+    non_fiber_carb: float
+    PAF: float
+
+
+class AvailableFeedsBuilder:
+    """
+    Builds the list of feeds available for use in the simulation.
+
+    This class is responsible for loading feed composition data from the input
+    manager, translating it into simulation-friendly types, and constructing
+    the purchased feeds configured for the simulation.
+    """
+
+    @staticmethod
+    def setup_available_feeds(feed_config: dict[str, list[Any]], nutrient_standard: NutrientStandard) -> list[Feed]:
+        """
+        Creates sorted list of feeds available for use in the simulation.
+
+        Parameters
+        ----------
+        feed_config : dict[str, list[Any]]
+            Mapping of the feeds available for purchase to the prices of those feeds.
+        nutrient_standard : NutrientStandard
+            Indicates whether the NASEM or NRC nutrient standards is being used.
+
+        Returns
+        -------
+        list[Feed]
+            Nutrition and price information of feeds available in the simulation.
+
+        """
+        feed_library = AvailableFeedsBuilder._process_feed_library(nutrient_standard)
+        AvailableFeedsBuilder._validate_feed_config(feed_config, feed_library, nutrient_standard)
+
+        feed_representation = NASEMFeed if nutrient_standard is NutrientStandard.NASEM else NRCFeed
+        available_feeds: list[Feed] = []
+        feeds_to_parse = feed_config["feeds"]
+        for feed in feeds_to_parse:
+            rufas_id = feed["feed_type"]
+            price = feed["purchased_feed_cost"]
+            buffer = feed["buffer"]
+            nutritive_properties = feed_library[rufas_id]
+            new_feed = feed_representation(
+                rufas_id=rufas_id,
+                amount_available=0.0,
+                on_farm_cost=price * ON_FARM_TO_PURCHASED_PRICE_RATIO,
+                purchase_cost=price,
+                buffer=buffer,
+                **nutritive_properties,
+            )
+            available_feeds.append(new_feed)
+
+        return sorted(available_feeds, key=lambda feed: feed.rufas_id)
+
+    @staticmethod
+    def _validate_feed_config(
+        feed_config: dict[str, Any], feed_library: dict[RUFAS_ID, dict[str, Any]], nutrient_standard: NutrientStandard
+    ) -> None:
+        """
+        Validates the feed configuration prior to constructing available feeds.
+
+        Parameters
+        ----------
+        feed_config : dict[str, Any]
+            Feed configuration input containing the top-level ``feeds`` and ``rations`` sections.
+        feed_library : dict[RUFAS_ID, dict[str, Any]]
+            Mapping of RuFaS feed IDs to the nutritional properties available in the selected feed library.
+        nutrient_standard : NutrientStandard
+            Indicates whether the NASEM or NRC nutrient standards is being used.
+
+        Raises
+        ------
+        ValueError
+            - If any configured feed type does not exist in the selected feed library.
+            - If duplicate feed types are present in the top-level ``feeds`` section.
+            - If duplicate feed types are present within an individual ration.
+            - If a ration references a feed type that is not defined in the top-level ``feeds`` section.
+
+        Notes
+        -----
+        These checks ensure that all ration feeds are uniquely defined, correspond to purchasable feeds configured for
+        the simulation, and can be successfully mapped to feed composition data from the selected feed library.
+
+        """
+        feeds_to_parse = feed_config["feeds"]
+        rations_to_parse = feed_config["rations"]
+
+        config_feed_ids = [feed["feed_type"] for feed in feeds_to_parse]
+
+        missing_feed_types = set(config_feed_ids) - set(feed_library)
+        if missing_feed_types:
+            raise ValueError(
+                f"The following feed_type values are not present in the selected {str(nutrient_standard.value)} "
+                f"feed library: {sorted(missing_feed_types)}."
+            )
+
+        repeated_feed_types = AvailableFeedsBuilder._find_feed_repeats(config_feed_ids)
+        if repeated_feed_types:
+            raise ValueError(
+                "The feed config contains repeated feed_type entries in the top-level "
+                f"'feeds' section: {sorted(repeated_feed_types)}."
+            )
+
+        configured_feed_type_set = set(config_feed_ids)
+
+        for ration in rations_to_parse:
+            animal_combination = ration["animal_combination"]
+            ration_feed_ids = [feed["feed_type"] for feed in ration["feeds"]]
+
+            repeated_ration_feed_types = AvailableFeedsBuilder._find_feed_repeats(ration_feed_ids)
+            if repeated_ration_feed_types:
+                raise ValueError(
+                    "The feed config contains repeated feed_type entries in the ration "
+                    f"for animal_combination '{animal_combination}': "
+                    f"{sorted(repeated_ration_feed_types)}."
+                )
+
+            missing_feed_types = set(ration_feed_ids) - configured_feed_type_set
+            if missing_feed_types:
+                raise ValueError(
+                    "The feed config contains ration feed_type entries that are not "
+                    "defined in the top-level 'feeds' section for animal_combination "
+                    f"'{animal_combination}': {sorted(missing_feed_types)}."
+                )
+
+    @staticmethod
+    def _find_feed_repeats(values: list[RUFAS_ID]) -> set[RUFAS_ID]:
+        """Finds values that occur more than once in a list."""
+        return {value for value, count in Counter(values).items() if count > 1}
+
+    @staticmethod
+    def _process_feed_library(nutrient_standard: NutrientStandard) -> dict[RUFAS_ID, dict[str, Any]]:
+        """
+        Collects and processes the feed library input so that it can be translated into a simulation-friendly format.
+
+        Parameters
+        ----------
+        nutrient_standard : NutrientStandard
+            Indicates whether the NASEM or NRC nutrient standards is being used.
+
+        Returns
+        -------
+        dict[RUFAS_ID, dict[str, Any]]
+            Mapping of RuFaS feed IDs to the nutritional properties of those feeds.
+
+        """
+        im = InputManager()
+        feed_library: dict[str, list[Any]] = (
+            im.get_data("NASEM_Comp") if nutrient_standard is NutrientStandard.NASEM else im.get_data("NRC_Comp")
+        )
+
+        converted_feed_library = Utility.convert_dict_of_lists_to_list_of_dicts(feed_library)
+
+        processed_feed_library = {feed["rufas_id"]: feed for feed in converted_feed_library}
+        for feed in processed_feed_library.values():
+            del feed["rufas_id"]
+            feed["feed_type"] = FeedComponentType(feed["feed_type"])
+            feed["Fd_Category"] = FeedCategorization(feed["Fd_Category"])
+            feed["units"] = MeasurementUnits(feed["units"])
+        return processed_feed_library
+
+
+@dataclass
+class TotalInventory:
+    """
+    Contains information about the amounts of feeds held at the specified date.
+
+    Attributes
+    ----------
+    available_feeds : list[Feed]
+        List of Feeds which are held by the Feed Storage module and are available to feed to animals.
+    inventory_date : date
+        Date at which the amounts of feeds expected to be held.
+
+    """
+
+    available_feeds: dict[RUFAS_ID, float]
+    inventory_date: date
+
+
+@dataclass
+class IdealFeeds:
+    """
+    Amounts of feeds that would ideally be purchased before the next harvest of a crop.
+
+    Attributes
+    ----------
+    ideal_feeds : dict[RUFAS_ID, float]
+        Amounts of feeds which would ideally be purchased before the next harvest of a crop, where the key is the RuFaS
+        Feed ID and the value is the requested feed amount (kg).
+
+    """
+
+    ideal_feeds: dict[RUFAS_ID, float]
+
+
+@dataclass
+class RequestedFeed:
+    """
+    Total amounts of feed needed for the herd.
+
+    Attributes
+    ----------
+    requested_feed : dict[RUFAS_ID, float]
+        Amounts of feeds to be fed to the herd, where the key is the RuFaS Feed ID and the value is the requested feed
+        amount (kg).
+
+    """
+
+    requested_feed: dict[RUFAS_ID, float]
+
+    def __add__(self, other: "RequestedFeed") -> "RequestedFeed":
+        if not isinstance(other, RequestedFeed):
+            return NotImplemented
+
+        combined_feed = defaultdict(float, self.requested_feed)
+        for feed_id, amount in other.requested_feed.items():
+            combined_feed[feed_id] += amount
+
+        return RequestedFeed(dict(combined_feed))
+
+    def __mul__(self, multiplier: int | float) -> "RequestedFeed":
+        is_wrong_type = (not isinstance(multiplier, int)) and (not isinstance(multiplier, float))
+        if is_wrong_type:
+            raise TypeError("Cannot multiply RequestedFeed object by a non-integer or float.")
+
+        new_feed_amounts = {rufas_id: amount * multiplier for rufas_id, amount in self.requested_feed.items()}
+        return RequestedFeed(new_feed_amounts)
+
+    def __rmul__(self, multiplier: int | float) -> "RequestedFeed":
+        return multiplier * self
+
+
+@dataclass
+class FeedFulfillmentResults:
+    """Tracks how much feed was deducted from purchased and farmgrown sources to fulfill a request."""
+
+    purchased: dict[RUFAS_ID, float] = field(default_factory=dict)
+    farmgrown: dict[RUFAS_ID, float] = field(default_factory=dict)
+
+    @classmethod
+    def fulfill_feed_request_as_purchased(cls, requested_feed: RequestedFeed) -> "FeedFulfillmentResults":
+        """
+        Create a fulfillment result where all requested feed is satisfied by purchased sources.
+
+        This is used when the feed module is not simulated.
+        """
+        return cls(
+            purchased=dict(requested_feed.requested_feed),
+            farmgrown={},
+        )
+
+    @classmethod
+    def empty(
+        cls,
+        *,
+        requested_feed_ids: list[RUFAS_ID] | None = None,
+        farmgrown_feed_ids: list[RUFAS_ID] | None = None,
+    ) -> "FeedFulfillmentResults":
+        """Create an empty results object with optional initialized keys."""
+        requested_feed_ids = requested_feed_ids or []
+        farmgrown_feed_ids = farmgrown_feed_ids or []
+
+        return cls(
+            purchased={feed_id: 0.0 for feed_id in requested_feed_ids},
+            farmgrown={feed_id: 0.0 for feed_id in farmgrown_feed_ids},
+        )
+
+    def add_purchased(self, feed_id: RUFAS_ID, amount: float) -> None:
+        """Add deducted purchased feed for a given feed ID."""
+        self.purchased[feed_id] = self.purchased.get(feed_id, 0.0) + amount
+
+    def add_farmgrown(self, feed_id: RUFAS_ID, amount: float) -> None:
+        """Add deducted farmgrown feed for a given feed ID."""
+        self.farmgrown[feed_id] = self.farmgrown.get(feed_id, 0.0) + amount
+
+    def total_deducted_for_feed(self, feed_id: RUFAS_ID) -> float:
+        """Return total deducted amount for a single feed ID across all sources."""
+        return self.purchased.get(feed_id, 0.0) + self.farmgrown.get(feed_id, 0.0)
+
+
+class PurchaseAllowance:
+    """
+    Limits on amounts of feeds that may be purchased at a given time.
+
+    Attributes
+    ----------
+    allowances : dict[RUFAS_ID, float]
+        Amounts of feeds that may be purchased, where the key is the RuFaS Feed ID and the value is the maximum amount
+        of that feed (kg).
+
+    """
+
+    _purchase_allowance_key: str
+
+    def __init__(self, feed_config_data: list[dict[str, int | float]]) -> None:
+        self.allowances = self._setup_purchase_allowance(feed_config_data)
+
+    def _setup_purchase_allowance(self, feed_config_data: list[dict[str, int | float]]) -> dict[int | float, float]:
+        return {
+            feed_config["purchased_feed"]: feed_config[self._purchase_allowance_key] for feed_config in feed_config_data
+        }
+
+
+class PlanningCycleAllowance(PurchaseAllowance):
+    """User-defined limits on feeds that may be purchased between harvests of a crop."""
+
+    _purchase_allowance_key: str = "planning_cycle_allowance"
+
+
+class AdvancePurchaseAllowance(PurchaseAllowance):
+    """User-defined limits on feeds that may be purchased at the beginning of a ration interval."""
+
+    _purchase_allowance_key: str = "advance_purchase_allowance"
+
+
+class RuntimePurchaseAllowance(PurchaseAllowance):
+    """User-defined limits on feeds that may be purchased on a daily basis."""
+
+    _purchase_allowance_key: str = "runtime_purchase_allowance"

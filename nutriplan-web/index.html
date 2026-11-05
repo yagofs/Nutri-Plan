@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f7f7f2">
+<title>NutriPlan | Otimização de dietas</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+<aside class="sidebar" aria-label="Menu do aplicativo">
+  <div class="brand"><div><strong class="brand-name">NutriPlan</strong><span class="brand-subtitle">Pesquisa Operacional</span></div></div>
+  <div class="sidebar-group"><p class="sidebar-label">Navegação</p>
+    <nav class="tabs" aria-label="Navegação principal">
+      <button class="tab active" data-view="setup" aria-current="page"><span class="nav-index" aria-hidden="true">1</span>Configuração</button>
+      <button class="tab" data-view="results"><span class="nav-index" aria-hidden="true">2</span>Resultados</button>
+      <button class="tab" data-view="native"><span class="nav-index" aria-hidden="true">3</span>Motor RuFaS</button>
+      <button class="tab" data-view="method"><span class="nav-index" aria-hidden="true">4</span>Metodologia</button>
+    </nav>
+  </div>
+  <div class="sidebar-bottom"><span class="environment-label">Ambiente local</span><span class="environment-value">Dados ilustrativos</span></div>
+</aside>
+<div class="workspace">
+  <header class="topbar"><span class="breadcrumb">Ferramenta acadêmica / Otimização alimentar</span><span class="local-status">Processamento local</span></header>
+  <main class="shell">
+    <div class="heading-row"><div><p class="document-overline">ESTUDO DE CASO <span class="overline-divider">/</span> FORMULAÇÃO ALIMENTAR</p><h1>Otimização de dietas</h1><p>Encontre a combinação de ingredientes de menor custo para as exigências nutricionais que você definiu.</p></div><span class="model-indicator"><span class="model-dot" aria-hidden="true"></span> Modo de estudo: SciPy</span></div>
+    <section id="setup" class="view" aria-label="Configuração do experimento">
+      <div class="setup-grid">
+        <section class="card animal-card" aria-labelledby="animalTitle">
+          <div class="section-heading"><div><p class="stage-heading">01 <span aria-hidden="true">/</span> PERFIL DO ANIMAL</p><h2 id="animalTitle">Características do bovino</h2><p>Informe o perfil e as exigências usadas na formulação.</p></div></div>
+          <div class="fields">
+            <div class="field full"><label for="category">Categoria animal</label><select class="input" id="category"><option value="Vaca leiteira em lactação">Vaca leiteira em lactação</option><option value="Novilha em crescimento">Novilha em crescimento (modelo simplificado)</option></select></div>
+            <div class="field"><label for="weight">Peso corporal (kg)</label><input class="input" id="weight" type="number" min="1" value="600"></div>
+            <div class="field"><label for="milk">Produção de leite (kg/dia)</label><input class="input" id="milk" type="number" min="0" value="25"></div>
+            <div class="field"><label for="dmi">Ingestão de MS (kg/dia)</label><input class="input" id="dmi" type="number" min="1" step="0.1" value="20"></div>
+            <div class="field"><label for="energy_min">Energia mínima (Mcal/dia)</label><input class="input" id="energy_min" type="number" min="0" step="0.1" value="30"></div>
+            <div class="field"><label for="cp_min">Proteína bruta mínima (% MS)</label><input class="input" id="cp_min" type="number" min="0" max="100" step="0.1" value="15"></div>
+            <div class="field"><label for="ndf_min">FDN mínima (% MS)</label><input class="input" id="ndf_min" type="number" min="0" max="100" step="0.1" value="28"></div>
+            <div class="field"><label for="ndf_max">FDN máxima (% MS)</label><input class="input" id="ndf_max" type="number" min="0" max="100" step="0.1" value="45"></div>
+            <div class="field"><label for="forage_min">Volumosos mínimos (% MS)</label><input class="input" id="forage_min" type="number" min="0" max="100" step="0.1" value="35"></div>
+          </div>
+        </section>
+        <aside class="guide" aria-label="Orientação para preenchimento">
+          <div><h2>Como preparar os dados</h2><p>Para comparar dietas, mantenha consistentes as unidades, os preços e as referências nutricionais.</p>
+            <div class="guide-points"><div class="guide-point"><strong>Preço</strong><span>Use R$/kg de matéria natural, com data e fonte da cotação.</span></div><div class="guide-point"><strong>Composição</strong><span>Registre PB, FDN e energia com referência nutricional.</span></div><div class="guide-point"><strong>Restrições</strong><span>Confira os limites de inclusão e a dieta-base de cada alimento.</span></div></div>
+          </div>
+          <div class="guide-foot"><span class="guide-kicker">De onde vêm os dados?</span><p><strong>CEPEA</strong> para preços de mercado; tabelas científicas para nutrientes e exigências.</p><a href="https://www.cepea.org.br/br/indicador/" target="_blank" rel="noopener noreferrer">Consultar indicadores CEPEA</a></div>
+        </aside>
+      </div>
+      <section class="card ingredient-card" aria-labelledby="feedsTitle">
+        <div class="ingredient-head"><div><p class="stage-heading">02 <span aria-hidden="true">/</span> FORMULAÇÃO</p><h2 id="feedsTitle">Ingredientes e preços <span class="count" id="feedCount">5 alimentos</span></h2><p>Edite os valores na tabela; abra os detalhes para definir limites e registrar a fonte.</p></div><button class="btn" id="addFeed" type="button">Adicionar ingrediente</button></div>
+        <div class="tablewrap" role="region" aria-label="Tabela de ingredientes editáveis" tabindex="0"><table class="table feed-table"><thead><tr><th class="ingredient-name" scope="col">Ingrediente</th><th class="money-col" scope="col">Preço<br>R$/kg natural</th><th class="numeric-col" scope="col">MS (%)</th><th class="numeric-col" scope="col">PB (%)</th><th class="numeric-col" scope="col">FDN (%)</th><th class="energy-col" scope="col">Energia<br>Mcal/kg MS</th><th class="forage-col" scope="col">Volumoso</th><th class="action-col" scope="col">Mais dados</th></tr></thead><tbody id="feedRows"></tbody></table></div>
+        <p class="ingredient-note"><strong>Fonte dos preços:</strong> <a href="https://www.cepea.org.br/br/indicador/milho.aspx" target="_blank" rel="noopener noreferrer">Milho no CEPEA</a> · <a href="https://www.cepea.org.br/br/indicador/soja.aspx" target="_blank" rel="noopener noreferrer">Soja no CEPEA</a>. O preço histórico do milho é apenas uma referência; os outros preços de exemplo são hipotéticos. Soja em grão não equivale a farelo de soja.</p>
+        <div class="ingredient-footer"><div><button class="btn primary" id="run" type="button">Calcular dieta de menor custo <span aria-hidden="true">→</span></button><div class="micro-note">O cálculo usa programação linear. O resultado aparece na guia Resultados.</div></div><div class="action-pair"><button class="btn" id="exportConfig" type="button">Exportar cenário</button><button class="btn" id="reset" type="button">Restaurar exemplo</button></div></div>
+        <div id="errorBox" class="hidden" role="alert"></div>
+      </section>
+      <p class="foot">A comparação com a dieta-base depende da soma das quantidades informadas ser igual à ingestão de matéria seca. Valores do exemplo não representam indicação zootécnica.</p>
+    </section>
+    <section id="results" class="view hidden results-wrap" aria-label="Resultados da otimização">
+      <div id="resultEmpty" class="empty"><strong>Seu experimento começa na configuração.</strong>Defina o bovino e os ingredientes e pressione “Calcular dieta ótima” para visualizar custos e restrições.</div>
+      <div id="resultContent" class="hidden">
+        <div class="result-title"><div><h2>Dieta de menor custo</h2><p id="engine">Resultados para fins acadêmicos</p></div><div class="section-actions"><button class="btn sm" id="downloadCsv" type="button">Exportar CSV</button><button class="btn sm" type="button" onclick="window.print()">Imprimir</button></div></div>
+        <div class="result-overview"><div class="hero-metric"><div class="k">CUSTO ESTIMADO / ANIMAL / DIA</div><div class="v" id="costDay">—</div><div class="s">Cenário otimizado · valores dependem das fontes informadas</div></div><div class="metrics"><div class="metric"><div class="k">Custo em 30 dias</div><div class="v" id="costMonth">—</div><div class="s">Por animal</div></div><div class="metric"><div class="k">Ingestão de MS</div><div class="v" id="rDmi">—</div><div class="s">kg/dia</div></div><div class="metric"><div class="k">Economia vs. base</div><div class="v" id="saving">—</div><div class="s" id="savingLabel">Informe base válida</div></div></div></div>
+        <div class="res-grid"><section class="card"><h2>Ingredientes da dieta</h2><p class="sub">Percentual de cada alimento na matéria seca total</p><div id="bars"></div><h3>Quantidades e custos</h3><div class="tablewrap"><table class="table" style="min-width:550px"><thead><tr><th>Ingrediente</th><th>kg MS/dia</th><th>kg natural/dia</th><th>Custo diário</th></tr></thead><tbody id="resultRows"></tbody></table></div></section><section class="card"><h2>Restrições atendidas</h2><p class="sub">Valores calculados e metas definidas para o estudo</p><div id="checks"></div><div class="notice"><strong>Identificação do cálculo.</strong> Resultado do modelo linear SciPy/HiGHS; não é uma simulação nativa do RuFaS. Para uma análise com RuFaS, use a guia correspondente.</div></section></div>
+      </div>
+    </section>
+    <section id="native" class="view hidden native" aria-label="Integração com RuFaS"><div class="card"><p class="stage-heading">Integração científica · experimental</p><h2>Motor nativo do RuFaS</h2><p class="sub">Esta área chama <code>RUFAS.biophysical.animal.ration.ration_optimizer.RationOptimizer</code> no Python local. Para isso, use os dados completos de <code>Feed</code> e <code>NutritionRequirements</code> da versão instalada do RuFaS. A tabela simplificada da configuração não substitui esses dados.</p>
+      <div class="steps"><div class="step"><b>Instale o RuFaS</b>Clone o repositório e instale suas dependências no ambiente Python do servidor.</div><div class="step"><b>Prepare o conjunto nutricional</b>Use os dados da biblioteca e as exigências do grupo para gerar o JSON completo.</div><div class="step"><b>Execute e valide</b>Importe os dados e confira a viabilidade antes de utilizar o resultado na pesquisa.</div></div>
+      <div class="fields"><div class="field full"><label for="nativeJson">Arquivo JSON completo</label><div class="upload"><input type="file" id="nativeJson" accept=".json,application/json"><p class="field hint">Use Feed e NutritionRequirements completos da instalação local, com valores e fontes validados. Dados enviados apenas ao servidor local.</p></div></div></div>
+      <div class="actions"><button class="btn primary" id="runNative" type="button">Executar com RuFaS</button><button class="btn" id="nativeSchema" type="button">Baixar modelo JSON</button></div>
+      <div id="nativeOutput" class="formula" aria-live="polite" style="margin-top:18px">Nenhuma execução nativa realizada.</div><div class="notice"><strong>Entrada científica:</strong> o modo nativo usa NRC nesta versão. Os poucos campos do modo didático não bastam para gerar Feed e NutritionRequirements completos. Valide composição, exigências, unidades e preços antes de interpretar a dieta.</div>
+    </div></section>
+    <section id="method" class="view hidden doc" aria-label="Metodologia"><div class="card"><p class="stage-heading">Referência metodológica</p><h2>Modelo de Pesquisa Operacional</h2><p class="method-lead">A variável de decisão <strong>xᵢ</strong> representa a quantidade de matéria seca do ingrediente i, em kg por animal/dia. O modelo busca o menor custo sujeito às metas nutricionais informadas.</p>
+      <h3>Função objetivo</h3><div class="formula">Min Z = Σ (preço_i / fração_MS_i) × x_i</div>
+      <h3>Restrições do modelo didático</h3><div class="formula">Σ x_i = DMI (kg de matéria seca por dia)
+Σ PB_i × x_i ≥ DMI × PB_min
+DMI × FDN_min ≤ Σ FDN_i × x_i ≤ DMI × FDN_max
+Σ Energia_i × x_i ≥ Energia_min (Mcal/dia)
+Σ x_i (somente volumosos) ≥ DMI × Volumoso_min
+mín_i ≤ x_i ≤ máx_i</div>
+      <p>As proporções de proteína, fibra e volumosos são expressas como frações entre 0 e 1. O cálculo didático utiliza programação linear pelo algoritmo HiGHS da biblioteca SciPy.</p>
+      <h3>Por que integrar com RuFaS?</h3><p>O RuFaS fornece o otimizador <code>RationOptimizer</code>, que utiliza programação não linear e restrições adicionais. O adaptador permite chamá-lo com objetos científicos completos, sem preencher nutrientes ausentes com suposições.</p>
+      <h3>Como tratar restrições não lineares</h3><p>Uma restrição é não linear quando a oferta ou o limite depende de relações que não podem ser representadas por uma soma fixa de coeficientes vezes as quantidades dos ingredientes. No RuFaS, a oferta de nutrientes é recalculada a partir da dieta e pode depender do consumo, da digestibilidade e das interações entre nutrientes e alimentos. Não simplifique essas relações para PB, FDN ou energia linear quando o objetivo for um resultado RuFaS.</p>
+      <p>O <code>RationOptimizer</code> minimiza o custo com o método SLSQP e recebe funções de restrição que calculam a diferença entre oferta e exigência (ou entre oferta e limite). Para limites inferiores, a diferença deve ser não negativa; para limites superiores, a função é construída para também retornar valor não negativo quando respeitada. A aplicação deve avaliar essas funções no resultado final e mostrar cada restrição como atendida ou não atendida, com sua folga e unidade quando disponível.</p>
+      <p>Se o solucionador falhar, não apresente uma dieta como viável. Informe que não encontrou solução e, quando possível, mostre as restrições que falharam. Verifique os dados e unidades, a compatibilidade entre limites dos ingredientes e ingestão total, e se as exigências podem ser atendidas pelos alimentos selecionados. Como SLSQP é um método local, uma solução encontrada não prova que foi encontrado o mínimo global; registre padrão nutricional, entradas, limites e estado do solucionador, e compare execuções quando a sensibilidade ao ponto inicial for relevante.</p>
+      <p><strong>Separação dos motores:</strong> o cálculo didático desta aplicação usa HiGHS e restrições lineares. Ele não implementa as restrições não lineares do RuFaS. Só identifique um resultado como RuFaS quando a chamada nativa tiver sido executada e suas restrições avaliadas.</p>
+      <h3>Origem e limites dos dados</h3><p>CEPEA: cotação, praça, unidade e data. Tabelas nutricionais NASEM/NRC ou equivalentes: composição e exigências. O exemplo de milho em saca de 60 kg é convertido para R$/kg de matéria natural. Não substitua o preço de farelo de soja pelo indicador de soja em grão.</p><p>Peso e produção de leite não determinam automaticamente as exigências no modo didático. A ferramenta não substitui formulação zootécnica profissional e não deve apresentar resultados SciPy como simulações RuFaS. Observe a licença dos dados CEPEA.</p>
+      <p><a href="https://ruminantfarmsystems.github.io/RuFaS/_code/RUFAS.biophysical.animal.ration.ration_optimizer.html" target="_blank" rel="noopener noreferrer">Documentação do otimizador RuFaS</a> · <a href="https://www.cepea.org.br/br/indicador/" target="_blank" rel="noopener noreferrer">CEPEA</a> · <a href="https://ruminantfarmsystems.github.io/RuFaS/_wiki/Data-Collection-App.html" target="_blank" rel="noopener noreferrer">Data Collection App</a></p>
+    </div></section>
+  </main>
+</div>
+</div>
+<script>
+
+'use strict';
+// Preços do exemplo exceto milho: HIPOTÉTICOS. Composições: ILUSTRATIVAS; devem ser validadas.
+const initialFeeds=[
+ {name:'Silagem de milho',dm:35,cp:8,ndf:42,energy:1.48,price:0.25,min:4,max:15,baseline:10,forage:true,source:'Hipotético (substituir)',source_date:''},
+ {name:'Feno de capim',dm:86,cp:10,ndf:63,energy:1.25,price:1.20,min:0,max:7,baseline:2,forage:true,source:'Hipotético (substituir)',source_date:''},
+ {name:'Milho em grão',dm:88,cp:9,ndf:11,energy:2.01,price:1.1705,min:0,max:7,baseline:3,forage:false,source:'CEPEA — milho ESALQ/B3 (R$ 70,23/sc 60kg)',source_date:'2026-08-31'},
+ {name:'Farelo de soja',dm:89,cp:48,ndf:12,energy:1.92,price:2.40,min:0,max:6,baseline:4,forage:false,source:'Hipotético (não é indicador de soja)',source_date:''},
+ {name:'Polpa cítrica',dm:90,cp:7,ndf:21,energy:1.73,price:1.40,min:0,max:5,baseline:1,forage:false,source:'Hipotético (substituir)',source_date:''}
+];
+let feeds=structuredClone(initialFeeds), lastResult=null;
+const $=id=>document.getElementById(id);
+const n=v=>Number(v);
+const displayNumber=(v,d)=>{const x=Number(v);return Number.isFinite(x)&&Math.abs(x)<0.5*Math.pow(10,-d)?0:x;};
+const fmt=(v,d=2)=>displayNumber(v,d).toLocaleString('pt-BR',{minimumFractionDigits:d,maximumFractionDigits:d});
+const money=v=>displayNumber(v,2).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function showTab(tab){document.querySelectorAll('.tab').forEach(b=>{const selected=b.dataset.view===tab;b.classList.toggle('active',selected);if(selected)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});document.querySelectorAll('.view').forEach(el=>el.classList.toggle('hidden',el.id!==tab));if(window.innerWidth<851)window.scrollTo({top:0,behavior:'instant'});}
+document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>showTab(b.dataset.view)));
+let openDetails=new Set();
+const fieldLabels={name:'Ingrediente',dm:'Matéria seca',cp:'Proteína bruta',ndf:'Fibra detergente neutro',energy:'Energia',price:'Preço',min:'Mínimo',max:'Máximo',baseline:'Dieta-base',source:'Fonte do preço',source_date:'Data da cotação',composition_source:'Fonte da composição'};
+function renderTable(){
+ let html='';
+ feeds.forEach((f,i)=>{
+   const input=(k,type='number',step='.01')=>`<input aria-label="${esc(fieldLabels[k]||k)} de ${esc(f.name)}" name="${k}" data-i="${i}" type="${type}" ${type==='number'?`step="${step}" min="0"`:''} value="${esc(f[k]??'')}">`;
+   const expanded=openDetails.has(i);
+   html+=`<tr class="feed-row">
+     <td class="ingredient-name" data-label="Ingrediente">${input('name','text')}</td>
+     <td class="money-col" data-label="Preço (R$/kg natural)">${input('price','number','.0001')}</td>
+     <td data-label="MS (%)">${input('dm')}</td><td data-label="PB (%)">${input('cp')}</td><td data-label="FDN (%)">${input('ndf')}</td><td data-label="Energia (Mcal/kg MS)">${input('energy')}</td>
+     <td class="center forage-col" data-label="Volumoso"><input aria-label="${esc(f.name)} é volumoso" data-i="${i}" name="forage" type="checkbox" ${f.forage?'checked':''}></td>
+     <td class="action-col"><div class="table-actions"><button class="btn expander" type="button" data-expand="${i}" aria-expanded="${expanded}" aria-controls="feed-detail-${i}">Limites e fonte</button><button class="remove" type="button" data-remove="${i}" aria-label="Remover ${esc(f.name)}">Excluir</button></div></td>
+   </tr><tr id="feed-detail-${i}" class="feed-detail-row ${expanded?'':'hidden'}"><td colspan="8"><div class="feed-detail">
+    <p class="feed-detail-summary">Defina limites em kg de matéria seca por dia e registre a referência do preço.</p>
+    <div class="field"><label>Mín. kg MS</label>${input('min')}</div><div class="field"><label>Máx. kg MS</label>${input('max')}</div><div class="field"><label>Dieta-base kg MS</label>${input('baseline')}</div>
+    <div class="field source-field"><label>Fonte do preço</label>${input('source','text')}</div><div class="field date-field"><label>Data da fonte</label>${input('source_date','date')}</div><div class="field source-field"><label>Fonte da composição</label>${input('composition_source','text')}</div>
+   </div></td></tr>`;
+ });
+ $('feedRows').innerHTML=html;
+ $('feedCount').textContent=`${feeds.length} alimento${feeds.length===1?'':'s'}`;
+}
+$('feedRows').addEventListener('input',ev=>{const t=ev.target;if(t.matches('[data-i][name]')){const i=Number(t.dataset.i); feeds[i][t.name]=t.type==='checkbox'?t.checked:(t.type==='number'?t.value:t.value);}});
+$('feedRows').addEventListener('change',ev=>{const t=ev.target;if(t.type==='checkbox'&&t.dataset.i!==undefined)feeds[Number(t.dataset.i)].forage=t.checked;});
+$('feedRows').addEventListener('click',ev=>{const expand=ev.target.closest('[data-expand]');if(expand){const i=Number(expand.dataset.expand);if(openDetails.has(i))openDetails.delete(i);else openDetails.add(i);const row=$('feed-detail-'+i);row.classList.toggle('hidden',!openDetails.has(i));expand.setAttribute('aria-expanded',String(openDetails.has(i)));return;}const t=ev.target.closest('[data-remove]');if(!t)return;if(feeds.length<=2){alert('Mantenha pelo menos dois alimentos.');return;}const index=Number(t.dataset.remove);feeds.splice(index,1);openDetails=new Set([...openDetails].filter(i=>i!==index).map(i=>i>index?i-1:i));renderTable();});
+$('addFeed').addEventListener('click',()=>{if(feeds.length>=25)return alert('Máximo de 25 ingredientes.');feeds.push({name:'Novo ingrediente',dm:88,cp:10,ndf:30,energy:1.5,price:1,min:0,max:10,baseline:0,forage:false,source:'Informe a fonte',source_date:'',composition_source:''});renderTable();});
+$('reset').addEventListener('click',()=>{if(!confirm('Restaurar os dados de exemplo?'))return;feeds=structuredClone(initialFeeds);openDetails.clear();renderTable();$('errorBox').classList.add('hidden');});
+function scenario(){let animal={category:$('category').value,weight:n($('weight').value),milk:n($('milk').value),dmi:n($('dmi').value),energy_min:n($('energy_min').value),cp_min:n($('cp_min').value),ndf_min:n($('ndf_min').value),ndf_max:n($('ndf_max').value),forage_min:n($('forage_min').value)};return{animal,feeds:feeds.map(f=>({...f,dm:n(f.dm),cp:n(f.cp),ndf:n(f.ndf),energy:n(f.energy),price:n(f.price),min:n(f.min),max:n(f.max)})),baseline:feeds.map(f=>n(f.baseline)),metadata:{model:'Didático linear; não é resultado RuFaS',price_units:'R$/kg matéria natural',nutrients:'Composição ilustrativa - validar',exported_at:new Date().toISOString()}};}
+function download(name,content,type){let blob=new Blob([content],{type:type||'application/json;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),500);}
+$('exportConfig').addEventListener('click',()=>download('cenario-dieta-didatica.json',JSON.stringify(scenario(),null,2)));
+$('run').addEventListener('click',async()=>{const btn=$('run');btn.disabled=true;btn.textContent='Calculando…';$('errorBox').classList.add('hidden');try{const resp=await fetch('/api/optimize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(scenario())});const res=await resp.json();if(!resp.ok||!res.ok)throw Error(res.error||res.message||'Não foi possível otimizar.');lastResult=res;showResults(res);showTab('results');}catch(err){$('errorBox').textContent=err.message;$('errorBox').classList.remove('hidden');showTab('setup');}finally{btn.disabled=false;btn.innerHTML='Calcular dieta de menor custo <span aria-hidden="true">→</span>';}});
+function showResults(r){$('resultEmpty').classList.add('hidden');$('resultContent').classList.remove('hidden');$('engine').textContent=r.engine+' · resultados para fins acadêmicos';$('costDay').textContent=money(r.cost_day);$('costMonth').textContent=money(r.cost_month);$('rDmi').textContent=fmt(r.dmi,1);$('saving').textContent=r.saving_percent===null?'—':fmt(r.saving_percent,1)+'%';$('savingLabel').textContent=r.baseline_cost===null?r.baseline_status:'Base: '+money(r.baseline_cost)+'/dia';
+$('bars').innerHTML=r.ingredients.map(f=>`<div class="bar-line"><span>${esc(f.name)}</span><div class="bar-shell"><div class="bar-fill" style="width:${Math.max(0,Math.min(100,f.percent_dm))}%"></div></div><span class="bar-val">${fmt(f.percent_dm,1)}%</span></div>`).join('');
+$('resultRows').innerHTML=r.ingredients.map(f=>`<tr><td>${esc(f.name)}</td><td>${fmt(f.kg_dm,3)}</td><td>${fmt(f.kg_natural,3)}</td><td>${money(f.cost)}</td></tr>`).join('');
+const m=r.metrics,t=r.targets,lines=[['Proteína bruta',m.cp_pct,'≥ '+fmt(t.cp_pct)+'%',m.cp_pct>=t.cp_pct-0.0001,'%'],['FDN',m.ndf_pct,fmt(t.ndf_min)+' a '+fmt(t.ndf_max)+'%',m.ndf_pct>=t.ndf_min-.0001&&m.ndf_pct<=t.ndf_max+.0001,'%'],['Energia',m.energy,'≥ '+fmt(t.energy)+' Mcal',m.energy>=t.energy-.0001,' Mcal'],['Volumosos',m.forage_pct,'≥ '+fmt(t.forage_pct)+'%',m.forage_pct>=t.forage_pct-.0001,'%']];$('checks').innerHTML=lines.map(z=>`<div class="test"><div><b>${esc(z[0])}</b><small>Meta: ${esc(z[2])}</small></div><strong class="${z[3]?'ok':'error'}">${fmt(z[1])}${z[4]}</strong></div>`).join('');}
+$('downloadCsv').addEventListener('click',()=>{if(!lastResult)return;let rows=[['Ingrediente','kg MS/dia','kg natural/dia','Custo R$/dia','Fonte','Data'],...lastResult.ingredients.map(f=>[f.name,f.kg_dm,f.kg_natural,f.cost,f.source,f.source_date])];let csv='\ufeff'+rows.map(r=>r.map(cell=>'"'+String(cell??'').replaceAll('"','""')+'"').join(';')).join('\r\n');download('resultado-dieta.csv',csv,'text/csv;charset=utf-8');});
+$('nativeSchema').addEventListener('click',()=>{let sample={nutrient_standard:'NRC',animal_combination:'lac_cow',body_weight:600,dmi_initial:20,protein_initial:1800,requirements:{_INSTRUCOES:'Preencha todos os campos reais de NutritionRequirements, incluindo essential_amino_acids'},feeds:[{_INSTRUCOES:'Preencha todos os campos reais de Feed da biblioteca RuFaS; purchase_cost em unidade monetária/kg MS'}]};download('MODELO-ADAPTADOR-RUFAS-INCOMPLETO.json',JSON.stringify(sample,null,2));});
+$('runNative').addEventListener('click',async()=>{const box=$('nativeOutput'),file=$('nativeJson').files[0];if(!file){box.textContent='Selecione um JSON com dados completos de Feed e NutritionRequirements.';return;}try{let data=JSON.parse(await file.text());box.textContent='Executando motor nativo…';const req=await fetch('/api/rufas-native',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});let result=await req.json();if(!req.ok||!result.ok){box.textContent=result.error||result.message||'Não foi encontrada solução.';return;}box.innerHTML=`<h3>Resultado · ${esc(result.engine)}</h3><p>Custo diário por animal: <strong>${fmt(result.cost_day)} unidade monetária</strong> · 30 dias: ${fmt(result.cost_month)} · MS: ${fmt(result.dmi,3)} kg/dia</p><div class="tablewrap"><table class="table"><thead><tr><th>Ingrediente</th><th>kg MS/dia</th><th>kg natural/dia</th><th>% da MS</th><th>Custo/dia</th></tr></thead><tbody>${result.ingredients.map(f=>`<tr><td>${esc(f.name)}</td><td>${fmt(f.kg_dm,3)}</td><td>${fmt(f.kg_natural,3)}</td><td>${fmt(f.percent_dm,2)}%</td><td>${fmt(f.cost,2)}</td></tr>`).join('')}</tbody></table></div><h3>Restrições RuFaS</h3>${result.constraints.map(c=>`<div class="test"><span>${esc(c.name)}</span><strong class="${c.satisfied?'ok':'error'}">${c.satisfied?'Atendida':'Não atendida'} · folga ${fmt(c.slack,4)}</strong></div>`).join('')}<p>${esc(result.message)}</p>`;}catch(err){box.textContent='Erro: '+err.message;}});
+renderTable();
+</script>
+</body>
+</html>
