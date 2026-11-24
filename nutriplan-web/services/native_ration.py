@@ -472,11 +472,33 @@ def optimize_native(payload):
                         'message': 'The milk target cannot be below the current production reference.'}
     supplied_ndf = parameters.get('ndf_percentage')
     candidate_ndf_mode = not has_previous_ration and supplied_ndf in (None, '')
-    if not is_lactating and candidate_ndf_mode:
-        return {'ok': False, 'status': 'incomplete_input',
-                'error_code': 'ndf_required',
-                'missing_inputs': ['ndf_percentage'],
-                'message': 'Enter the diet NDF for this stage or provide a previous ration.'}
+
+    if candidate_ndf_mode and not is_lactating:
+        ndf = 30.0
+        result = None
+        for _ in range(6):
+            trial = {**payload, 'parameters': {**parameters, 'ndf_percentage': ndf}}
+            result = optimize_native(trial)
+            if not result.get('ok'):
+                return result
+            ndf_supply = (result.get('nutrient_supply') or {}).get('ndf', {}).get('value')
+            dry_matter = result.get('dmi')
+            if not (isinstance(ndf_supply, (int, float)) and math.isfinite(ndf_supply)
+                    and isinstance(dry_matter, (int, float)) and math.isfinite(dry_matter)
+                    and dry_matter > 0):
+                return {'ok': False, 'status': 'calculation_error',
+                        'message': 'Optimized ration NDF is not finite.'}
+            final_ndf = 100 * ndf_supply / dry_matter
+            if abs(final_ndf - ndf) <= 1e-3:
+                result['ration_context'] = {
+                    'ndf_percentage': final_ndf,
+                    'dry_matter_intake_kg_day': dry_matter,
+                    'source': 'RuFaS optimized feed composition',
+                }
+                return result
+            ndf = final_ndf
+        return {'ok': False, 'status': 'calculation_error',
+                'message': 'Candidate NDF did not converge for the non-lactating ration.'}
 
     if has_previous_ration:
         payload = prepare_animal_payload(payload)

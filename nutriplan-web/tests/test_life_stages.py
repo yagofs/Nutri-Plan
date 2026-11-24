@@ -87,13 +87,16 @@ class LifeStageOptimizationTests(unittest.TestCase):
             self.assertIsNone(result.get('milk_potential'))
             self.assertNotIn('target_results', result)
 
-    def test_non_lactating_needs_ndf_without_previous_ration(self):
+    def test_non_lactating_derives_ndf_from_optimized_ration(self):
         payload = heifer_payload('heifer_I')
         payload['parameters'].pop('ndf_percentage')
         result = optimize_native(payload)
-        self.assertFalse(result['ok'])
-        self.assertEqual(result['status'], 'incomplete_input')
-        self.assertIn('ndf_percentage', result['missing_inputs'])
+        self.assertTrue(result.get('ok'), result.get('message'))
+        self.assertAlmostEqual(
+            result['ration_context']['ndf_percentage'],
+            100 * result['nutrient_supply']['ndf']['value'] / result['dmi'],
+            places=3,
+        )
 
     def test_milk_target_scan_is_bypassed_for_non_lactating(self):
         payload = heifer_payload('heifer_II')
